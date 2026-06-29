@@ -10,6 +10,9 @@ import { parseAnsi, DEFAULT_FG } from "./ansi";
 import { PluginWrapper } from "../plugins/PluginWrapper";
 import { MatrixBar } from "../matrix/MatrixBar";
 import { reactorChannelShader } from "../matrix/shaders/reactorChannel";
+import { FileEditorPanel } from "./FileEditorPanel";
+
+type DetailTab = "logs" | "files";
 
 interface ServerDetailViewProps {
   server: ServerInstance;
@@ -48,6 +51,8 @@ export function ServerDetailView({
   const [input, setInput] = useState("");
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [activeTab, setActiveTab] = useState<DetailTab>("logs");
+  const [pluginExpanded, setPluginExpanded] = useState(true);
   const inputHistoryRef = useRef<string[]>([]);
 
   // Recompute whether the "scroll to bottom" button should be visible. The
@@ -264,6 +269,14 @@ export function ServerDetailView({
   // Disable lifecycle buttons while any transient operation is in flight.
   const transitioning = launching || busy;
 
+  // Use both the live process state (`running`) AND the parent's status
+  // overlay (`server.status`) so the correct set of action buttons
+  // (Restart/Stop vs Reinstall/Start) appears immediately on remount,
+  // without waiting for the async is_server_running seed to resolve.
+  // Orphaned instances never get running-state buttons — their persisted
+  // status may be stale since the live overlay is skipped for them.
+  const isEffectivelyRunning = !server.isOrphaned && (running || server.status === "running");
+
   return (
     <div className="flex flex-col h-full">
       {/* Header / metadata */}
@@ -327,7 +340,7 @@ export function ServerDetailView({
               {liveStatus}
             </span>
 
-            {running ? (
+	            {isEffectivelyRunning ? (
               <>
                 <button
                   onClick={restart}
@@ -408,85 +421,169 @@ export function ServerDetailView({
         </p>
       )}
 
-      {/* Plugin panel — isolated Shadow DOM hosting the plugin's custom UI. */}
-      <div className="m-4">
-        <PluginWrapper pluginId={server.serverType} serverData={server} />
-      </div>
-
-      {/* Log terminal */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-grid-bounds">
-        <span className="text-[10px] tracking-[0.2em] uppercase text-zinc-500">
-          latest.log
-        </span>
-        <span className="text-[10px] text-zinc-600 tabular-nums">
-          {logs.length} {logs.length === 1 ? "line" : "lines"}
-        </span>
-      </div>
-      <div
-        ref={terminalRef}
-        onScroll={handleScroll}
-        className="relative flex-1 min-h-0 overflow-y-auto bg-bg-core p-3 font-mono text-[11px] leading-relaxed"
-      >
-        {/* Floating "scroll to bottom" button — only visible when the
-            user has scrolled up away from the latest output. Fades in/out. */}
-        {showScrollButton && (
+      {/* Collapsible plugin panel — always visible below the header */}
+      {pluginManifest && (
+        <div className={`border-b shrink-0 transition-colors ${pluginExpanded ? "border-grid-bounds" : "border-transparent"}`}>
           <button
-            onClick={scrollToBottom}
-            className="absolute bottom-3 right-3 z-10 w-7 h-7 flex items-center justify-center rounded border border-grid-bounds bg-bg-surface text-zinc-400 hover:text-zinc-100 shadow-lg opacity-70 hover:opacity-100 transition-opacity duration-200"
-            title="Scroll to bottom"
+            onClick={() => setPluginExpanded((p) => !p)}
+            className={`flex w-full items-center justify-between px-4 py-1.5 transition-colors ${
+              pluginExpanded
+                ? "bg-bg-surface text-zinc-300"
+                : "bg-transparent text-zinc-500 hover:bg-bg-surface hover:text-zinc-300"
+            }`}
           >
-            ↓
+            <span className="flex items-center gap-2">
+              <span className={`text-[10px] tracking-[0.2em] uppercase font-semibold transition-colors ${
+                pluginExpanded ? "text-signal-high" : "text-zinc-500"
+              }`}>
+                plugin
+              </span>
+              <span className="text-[11px] text-zinc-600 font-mono">
+                {pluginManifest.displayName ?? pluginManifest.id}
+              </span>
+            </span>
+            <span className="flex items-center gap-2 text-[11px]">
+              <span className="text-zinc-600">
+                {pluginExpanded ? "▾" : "▸"}
+              </span>
+            </span>
           </button>
-        )}
-        {logs.length === 0 ? (
-          <p className="text-zinc-700">
-            no output yet — start the instance to begin streaming
-          </p>
-        ) : (
-          logs.map((line, i) => {
-            const segments = parseAnsi(line);
-            return (
-              <div
-                key={i}
-                className="whitespace-pre-wrap break-all"
-                style={{ color: DEFAULT_FG }}
-              >
-                {segments.map((seg, j) => (
-                  <span
-                    key={j}
-                    style={{
-                      color: seg.style.color,
-                      fontWeight: seg.style.bold ? 600 : undefined,
-                      opacity: seg.style.dim ? 0.6 : undefined,
-                    }}
-                  >
-                    {seg.text}
-                  </span>
-                ))}
-              </div>
-            );
-          })
-        )}
+          {pluginExpanded && (
+            <div className="px-4 pb-3 pt-1 border-t border-grid-bounds/50">
+              <PluginWrapper pluginId={server.serverType} serverData={server} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab bar — switch between Logs and Files */}
+      <div className="flex items-stretch border-b border-grid-bounds bg-bg-surface shrink-0">
+        <TabButton
+          label="logs"
+          active={activeTab === "logs"}
+          count={logs.length}
+          onClick={() => setActiveTab("logs")}
+        />
+        <TabButton
+          label="files"
+          active={activeTab === "files"}
+          onClick={() => setActiveTab("files")}
+        />
       </div>
 
-      {/* Terminal input — pinned to the bottom so the bottom of the input
-          box is the bottom of the page. The output viewport above scrolls
-          independently within the remaining space. */}
-      <div className="shrink-0 border-t border-grid-bounds bg-bg-surface px-3 py-2">
-        <form onSubmit={handleSubmit} className="flex items-center gap-2">
-          <span className="text-signal-high text-[11px] font-mono select-none">{">"}</span>
-          <input
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="start | stop | restart | install | or type to send stdin…"
-            className="flex-1 bg-transparent font-mono text-[11px] text-zinc-300 placeholder:text-zinc-600 caret-signal-high"
-            spellCheck={false}
-            autoComplete="off"
-          />
-        </form>
-      </div>
+      {/* Conditional content based on active tab */}
+      {activeTab === "logs" && (
+        <>
+          {/* Log terminal */}
+          <div className="flex items-center justify-between px-4 py-2 border-b border-grid-bounds shrink-0">
+            <span className="text-[10px] tracking-[0.2em] uppercase text-zinc-500">
+              latest.log
+            </span>
+            <span className="text-[10px] text-zinc-600 tabular-nums">
+              {logs.length} {logs.length === 1 ? "line" : "lines"}
+            </span>
+          </div>
+          <div
+            ref={terminalRef}
+            onScroll={handleScroll}
+            className="relative flex-1 min-h-0 overflow-y-auto bg-bg-core p-3 font-mono text-[11px] leading-relaxed"
+          >
+            {/* Floating "scroll to bottom" button */}
+            {showScrollButton && (
+              <button
+                onClick={scrollToBottom}
+                className="absolute bottom-3 right-3 z-10 w-7 h-7 flex items-center justify-center rounded border border-grid-bounds bg-bg-surface text-zinc-400 hover:text-zinc-100 shadow-lg opacity-70 hover:opacity-100 transition-opacity duration-200"
+                title="Scroll to bottom"
+              >
+                ↓
+              </button>
+            )}
+            {logs.length === 0 ? (
+              <p className="text-zinc-700">
+                no output yet — start the instance to begin streaming
+              </p>
+            ) : (
+              logs.map((line, i) => {
+                const segments = parseAnsi(line);
+                return (
+                  <div
+                    key={i}
+                    className="whitespace-pre-wrap break-all"
+                    style={{ color: DEFAULT_FG }}
+                  >
+                    {segments.map((seg, j) => (
+                      <span
+                        key={j}
+                        style={{
+                          color: seg.style.color,
+                          fontWeight: seg.style.bold ? 600 : undefined,
+                          opacity: seg.style.dim ? 0.6 : undefined,
+                        }}
+                      >
+                        {seg.text}
+                      </span>
+                    ))}
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Terminal input */}
+          <div className="shrink-0 border-t border-grid-bounds bg-bg-surface px-3 py-2">
+            <form onSubmit={handleSubmit} className="flex items-center gap-2">
+              <span className="text-signal-high text-[11px] font-mono select-none">{">"}</span>
+              <input
+                ref={inputRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="start | stop | restart | install | or type to send stdin…"
+                className="flex-1 bg-transparent font-mono text-[11px] text-zinc-300 placeholder:text-zinc-600 caret-signal-high"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </form>
+          </div>
+        </>
+      )}
+
+      {activeTab === "files" && (
+        <FileEditorPanel serverId={server.id} />
+      )}
+
     </div>
+  );
+}
+
+/* ─── Tab Button ──────────────────────────────────────────────────────── */
+
+interface TabButtonProps {
+  label: string;
+  active: boolean;
+  count?: number;
+  onClick: () => void;
+}
+
+function TabButton({ label, active, count, onClick }: TabButtonProps) {
+  return (
+    <button
+      onClick={onClick}
+      className={`
+        px-4 py-1.5 text-[10px] tracking-[0.2em] uppercase font-semibold
+        border-b-2 transition-colors
+        ${active
+          ? "border-signal-high text-zinc-200 bg-bg-core"
+          : "border-transparent text-zinc-600 hover:text-zinc-400 hover:bg-bg-core/50"
+        }
+      `}
+    >
+      {label}
+      {count !== undefined && (
+        <span className="ml-1.5 tabular-nums text-zinc-600">
+          {count}
+        </span>
+      )}
+    </button>
   );
 }

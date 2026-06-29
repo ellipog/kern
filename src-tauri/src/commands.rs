@@ -490,13 +490,183 @@ pub fn write_server_file(app_handle: AppHandle, id: String, rel_path: String, co
         .servers
         .get(&id)
         .ok_or_else(|| format!("server '{id}' not found"))?;
-    let target = std::path::Path::new(&instance.path).join(&rel_path);
+    let target = resolve_path(&instance.path, &rel_path)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create parent dirs: {e}"))?;
     }
     std::fs::write(&target, &content)
         .map_err(|e| format!("failed to write '{rel_path}': {e}"))
+}
+
+/// A single entry in a directory listing.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: u64,
+}
+
+/// Security: resolve a relative path against the instance root and reject
+/// paths that escape the instance directory (path traversal prevention).
+fn resolve_path(instance_root: &str, rel_path: &str) -> Result<std::path::PathBuf, String> {
+    let root = std::path::Path::new(instance_root);
+    // Normalize the relative path — strip leading `/` or `\`, reject absolute.
+    let clean = rel_path
+        .trim_start_matches('/')
+        .trim_start_matches('\\');
+    if std::path::Path::new(clean).is_absolute() {
+        return Err("absolute paths are not allowed".to_string());
+    }
+    let joined = root.join(clean);
+    // Canonicalize the root to resolve any `..` traversal, then ensure the
+    // resolved target is still under the root.
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve instance path: {e}"))?;
+    let target = if joined.exists() {
+        joined
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve target path: {e}"))?
+    } else {
+        // For non-existent paths, resolve parent and check the joined path
+        // is still under root by comparing components.
+        joined
+    };
+    if !target.starts_with(&canonical_root) {
+        return Err("path traversal detected".to_string());
+    }
+    Ok(target)
+}
+
+/// Reads a file's content from an instance's working directory.
+#[tauri::command]
+pub fn read_server_file(app_handle: AppHandle, id: String, rel_path: String) -> Result<String, String> {
+    let cfg = config::load_config(&app_handle)?;
+    let instance = cfg
+        .servers
+        .get(&id)
+        .ok_or_else(|| format!("server '{id}' not found"))?;
+    let target = resolve_path(&instance.path, &rel_path)?;
+    if !target.is_file() {
+        return Err(format!("'{}' is not a file or does not exist", rel_path));
+    }
+    std::fs::read_to_string(&target)
+        .map_err(|e| format!("failed to read '{rel_path}': {e}"))
+}
+
+/// Lists the contents of a directory inside an instance's working directory.
+/// Returns a sorted list of FileEntry values (directories first, then files).
+#[tauri::command]
+pub fn list_server_directory(app_handle: AppHandle, id: String, rel_path: String) -> Result<Vec<FileEntry>, String> {
+    let cfg = config::load_config(&app_handle)?;
+    let instance = cfg
+        .servers
+        .get(&id)
+        .ok_or_else(|| format!("server '{id}' not found"))?;
+    let target = resolve_path(&instance.path, &rel_path)?;
+    if !target.is_dir() {
+        return Err(format!("'{}' is not a directory or does not exist", rel_path));
+    }
+    let mut entries: Vec<FileEntry> = std::fs::read_dir(&target)
+        .map_err(|e| format!("failed to list directory '{rel_path}': {e}"))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let meta = entry.metadata().ok()?;
+            Some(FileEntry {
+                name,
+                is_dir: meta.is_dir(),
+                size: meta.len(),
+                modified: meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            })
+        })
+        .collect();
+    // Sort: directories first, then alphabetically within each group.
+    entries.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir) // dirs first
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+    Ok(entries)
+}
+
+/// Deletes a file or empty directory inside an instance's working directory.
+/// Non-empty directories return an error — use a future recursive variant for that.
+#[tauri::command]
+pub fn delete_server_path(app_handle: AppHandle, id: String, rel_path: String) -> Result<(), String> {
+    let cfg = config::load_config(&app_handle)?;
+    let instance = cfg
+        .servers
+        .get(&id)
+        .ok_or_else(|| format!("server '{id}' not found"))?;
+    let target = resolve_path(&instance.path, &rel_path)?;
+    if !target.exists() {
+        return Err(format!("'{}' does not exist", rel_path));
+    }
+    if target.is_dir() {
+        // Only remove empty directories.
+        let is_empty = target.read_dir().map_err(|e| format!("failed to read dir: {e}"))?.next().is_none();
+        if !is_empty {
+            return Err(format!("directory '{}' is not empty — delete files individually", rel_path));
+        }
+        std::fs::remove_dir(&target)
+            .map_err(|e| format!("failed to remove directory '{rel_path}': {e}"))
+    } else {
+        std::fs::remove_file(&target)
+            .map_err(|e| format!("failed to remove file '{rel_path}': {e}"))
+    }
+}
+
+/// Creates a directory (and any missing parents) inside an instance's working directory.
+#[tauri::command]
+pub fn create_server_directory(app_handle: AppHandle, id: String, rel_path: String) -> Result<(), String> {
+    let cfg = config::load_config(&app_handle)?;
+    let instance = cfg
+        .servers
+        .get(&id)
+        .ok_or_else(|| format!("server '{id}' not found"))?;
+    let target = resolve_path(&instance.path, &rel_path)?;
+    if target.exists() {
+        return Err(format!("'{}' already exists", rel_path));
+    }
+    std::fs::create_dir_all(&target)
+        .map_err(|e| format!("failed to create directory '{rel_path}': {e}"))
+}
+
+/// Renames (or moves) a file or directory inside an instance's working directory.
+/// Both old_rel_path and new_rel_path are relative to the instance root.
+#[tauri::command]
+pub fn rename_server_path(app_handle: AppHandle, id: String, old_rel_path: String, new_rel_path: String) -> Result<(), String> {
+    let cfg = config::load_config(&app_handle)?;
+    let instance = cfg
+        .servers
+        .get(&id)
+        .ok_or_else(|| format!("server '{id}' not found"))?;
+    let source = resolve_path(&instance.path, &old_rel_path)?;
+    let dest = resolve_path(&instance.path, &new_rel_path)?;
+    if !source.exists() {
+        return Err(format!("source '{}' does not exist", old_rel_path));
+    }
+    if dest.exists() {
+        return Err(format!("destination '{}' already exists", new_rel_path));
+    }
+    // Create parent directories for the destination if needed.
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create parent dirs: {e}"))?;
+    }
+    std::fs::rename(&source, &dest)
+        .map_err(|e| format!("failed to rename '{}' -> '{}': {e}", old_rel_path, new_rel_path))
 }
 
 /// Lists every installed community plugin (manifest), sorted by id.
