@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ServerInstance } from "../../types/server";
 
 interface PluginWrapperProps {
@@ -8,6 +8,10 @@ interface PluginWrapperProps {
   pluginId: string;
   /** Server data handed to the plugin's mount() function. */
   serverData: ServerInstance;
+  /** Whether the panel is currently collapsed. */
+  collapsed: boolean;
+  /** Toggle handler for collapse state. */
+  onToggleCollapsed: () => void;
 }
 
 /**
@@ -39,7 +43,7 @@ interface PluginWrapperProps {
  * error that occurs when React tries to reconcile children that were destroyed
  * by direct DOM manipulation.
  */
-export function PluginWrapper({ pluginId, serverData }: PluginWrapperProps) {
+export function PluginWrapper({ pluginId, serverData, collapsed, onToggleCollapsed }: PluginWrapperProps) {
   const shadowHostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error" | "none">("loading");
   const [message, setMessage] = useState<string>("");
@@ -72,7 +76,7 @@ export function PluginWrapper({ pluginId, serverData }: PluginWrapperProps) {
 
         // 3. Create a mount element inside the shadow root.
         const mountPoint = document.createElement("div");
-        mountPoint.style.fontFamily = "monospace";
+        mountPoint.style.width = "100%";
         shadow.appendChild(mountPoint);
 
         // 4. Inject the plugin's stylesheet if one ships next to the bundle.
@@ -96,10 +100,12 @@ export function PluginWrapper({ pluginId, serverData }: PluginWrapperProps) {
         if (cancelled) return;
         if (typeof plugin.mount === "function") {
           // Pass a host API object so the plugin can read .env files,
-          // call Tauri commands, or open folders in the file manager.
+          // call Tauri commands, open folders, or listen to backend event streams.
           const hostAPI = {
             invoke: (cmd: string, args?: Record<string, unknown>) => invoke(cmd, args),
             serverPath: serverData.path,
+            listen: (event: string, handler: (payload: unknown) => void) =>
+              listen(event, (e) => handler(e.payload)),
           };
           plugin.mount(mountPoint, serverData, hostAPI);
           loaded = plugin;
@@ -137,23 +143,35 @@ export function PluginWrapper({ pluginId, serverData }: PluginWrapperProps) {
 
   return (
     <div className="border border-grid-bounds bg-bg-surface">
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-grid-bounds">
-        <span className="text-[10px] tracking-[0.2em] uppercase text-zinc-500">
-          plugin panel
+      <button
+        type="button"
+        onClick={onToggleCollapsed}
+        className="flex items-center justify-between w-full px-3 py-1.5 border-b border-grid-bounds cursor-pointer hover:bg-white/[0.03] transition-colors"
+      >
+        <span className="flex items-center gap-1.5">
+          <svg
+            className={`w-3 h-3 text-zinc-500 transition-transform duration-150 ${collapsed ? "-rotate-90" : ""}`}
+            viewBox="0 0 16 16"
+            fill="currentColor"
+          >
+            <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span className="text-[10px] tracking-[0.2em] uppercase text-zinc-500">
+            plugin panel
+          </span>
         </span>
         <span
-          className={`text-[10px] ${
-            status === "ready"
-              ? "text-signal-high"
-              : status === "error"
-                ? "text-fault-vector"
-                : "text-zinc-600"
-          }`}
+          className={`text-[10px] ${status === "ready"
+            ? "text-signal-high"
+            : status === "error"
+              ? "text-fault-vector"
+              : "text-zinc-600"
+            }`}
         >
           {status}
         </span>
-      </div>
-      <div className="p-3 min-h-[80px]">
+      </button>
+      <div className={`p-3 min-h-[80px] ${collapsed ? "hidden" : ""}`}>
         {/*
           Dedicated shadow DOM host — React never renders children into this
           <div>, so attaching a shadow root to it never conflicts with React's

@@ -5,6 +5,7 @@ import { useServerControl } from "../../hooks/useServerControl";
 import { usePlugins } from "../../hooks/usePlugins";
 import { useMetrics } from "../../hooks/useMetrics";
 import { useLogActivity } from "../../hooks/useLogActivity";
+import { useUiState } from "../../hooks/useUiState";
 import { statusHex } from "./status";
 import { parseAnsi, DEFAULT_FG } from "./ansi";
 import { PluginWrapper } from "../plugins/PluginWrapper";
@@ -45,15 +46,50 @@ export function ServerDetailView({
   const metrics = useMetrics(server.id);
   // Log churn feeds the bar's activity lane so output bursts visibly flare.
   const activity = useLogActivity(server.id);
+  const { uiState, updateServer } = useUiState();
   const terminalRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const [input, setInput] = useState("");
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [showScrollButton, setShowScrollButton] = useState(false);
-  const [activeTab, setActiveTab] = useState<DetailTab>("logs");
-  const [pluginExpanded, setPluginExpanded] = useState(true);
   const inputHistoryRef = useRef<string[]>([]);
+
+  // ── Persisted per-server UI state ──────────────────────────────────────
+  // Read the saved state for this server (falls back to defaults when none).
+  const serverUi = uiState.servers[server.id] ?? {
+    activeTab: "logs" as const,
+    pluginExpanded: true,
+    commandHistory: [],
+    editor: { openFiles: [], activeFile: null, expandedPaths: [], cursorLine: 1, cursorCol: 1 },
+  };
+
+  const [activeTab, setActiveTabState] = useState<DetailTab>(serverUi.activeTab);
+  const [pluginExpanded, setPluginExpandedState] = useState(serverUi.pluginExpanded);
+
+  // Wrap the setters to also persist the change.
+  const setActiveTab = useCallback(
+    (tab: DetailTab) => {
+      setActiveTabState(tab);
+      updateServer(server.id, { activeTab: tab });
+    },
+    [server.id, updateServer],
+  );
+
+  const setPluginExpanded = useCallback(
+    (expanded: boolean) => {
+      setPluginExpandedState(expanded);
+      updateServer(server.id, { pluginExpanded: expanded });
+    },
+    [server.id, updateServer],
+  );
+
+  // Restore command history from persisted state on mount.
+  useEffect(() => {
+    if (serverUi.commandHistory.length > 0) {
+      inputHistoryRef.current = [...serverUi.commandHistory];
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Recompute whether the "scroll to bottom" button should be visible. The
   // button shows when the terminal's content overflows AND the user is parked
@@ -131,10 +167,13 @@ export function ServerDetailView({
         }
       }
       inputHistoryRef.current.push(trimmed);
+      // Persist the updated command history (capped to last 50 entries).
+      const capped = inputHistoryRef.current.slice(-50);
+      updateServer(server.id, { commandHistory: capped });
       setHistoryIndex(-1);
       setInput("");
     },
-    [input, running, server.id, pushLine, launch, stop, restart, install, handleInstalled],
+    [input, running, server.id, pushLine, launch, stop, restart, install, handleInstalled, updateServer],
   );
 
   // Up/Down arrows cycle through local command history.
@@ -340,7 +379,7 @@ export function ServerDetailView({
               {liveStatus}
             </span>
 
-	            {isEffectivelyRunning ? (
+            {isEffectivelyRunning ? (
               <>
                 <button
                   onClick={restart}
@@ -423,36 +462,15 @@ export function ServerDetailView({
 
       {/* Collapsible plugin panel — always visible below the header */}
       {pluginManifest && (
-        <div className={`border-b shrink-0 transition-colors ${pluginExpanded ? "border-grid-bounds" : "border-transparent"}`}>
-          <button
-            onClick={() => setPluginExpanded((p) => !p)}
-            className={`flex w-full items-center justify-between px-4 py-1.5 transition-colors ${
-              pluginExpanded
-                ? "bg-bg-surface text-zinc-300"
-                : "bg-transparent text-zinc-500 hover:bg-bg-surface hover:text-zinc-300"
-            }`}
-          >
-            <span className="flex items-center gap-2">
-              <span className={`text-[10px] tracking-[0.2em] uppercase font-semibold transition-colors ${
-                pluginExpanded ? "text-signal-high" : "text-zinc-500"
-              }`}>
-                plugin
-              </span>
-              <span className="text-[11px] text-zinc-600 font-mono">
-                {pluginManifest.displayName ?? pluginManifest.id}
-              </span>
-            </span>
-            <span className="flex items-center gap-2 text-[11px]">
-              <span className="text-zinc-600">
-                {pluginExpanded ? "▾" : "▸"}
-              </span>
-            </span>
-          </button>
-          {pluginExpanded && (
-            <div className="px-4 pb-3 pt-1 border-t border-grid-bounds/50">
-              <PluginWrapper pluginId={server.serverType} serverData={server} />
-            </div>
-          )}
+        <div className={`border-b shrink-0 transition-colors border-grid-bounds`}>
+          <div className="px-4 pb-3 pt-3 border-grid-bounds/50">
+            <PluginWrapper
+              pluginId={server.serverType}
+              serverData={server}
+              collapsed={!pluginExpanded}
+              onToggleCollapsed={() => setPluginExpanded(!pluginExpanded)}
+            />
+          </div>
         </div>
       )}
 

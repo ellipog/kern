@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppConfig, NewServerInput, ServerInstance } from "../../types/server";
+import type { SchemaField } from "../../types/manifest";
 import { usePlugins } from "../../hooks/usePlugins";
+import { useMcVersions, useDetectedJavaMajors, mcVersionToJavaMajor } from "../../hooks/useMcVersions";
 import { DynamicForm } from "./DynamicForm";
 
 interface ServerFormProps {
@@ -59,6 +61,74 @@ export function ServerForm({ initial, onSubmit, onCancel }: ServerFormProps) {
     [plugins, serverType],
   );
 
+  // Live-fetch MC versions and detect Java installations. We fetch
+  // immediately using the runtime override OR a default ("paper") so the
+  // dropdown is already populated by the time the user selects a plugin.
+  // No Rust rebuild required — the fetch runs directly in the browser.
+  const runtimeValue =
+    (selectedPlugin
+      ? schemaValues.runtime ??
+        selectedPlugin.configSchema.find((f) => f.key === "runtime")?.default
+      : "paper") || "paper";
+  const { versions: mcVersions, loading: versionsLoading } = useMcVersions(runtimeValue);
+  const { majors: javaMajors, loading: javaLoading } = useDetectedJavaMajors();
+
+  // When fresh versions arrive, auto-select the latest if no explicit value
+  // was set yet (or the saved one isn't in the new list).
+  useEffect(() => {
+    if (!selectedPlugin || mcVersions.length === 0) return;
+    setSchemaValues((prev) => {
+      const current = prev.mc_version;
+      if (current && mcVersions.includes(current)) return prev; // keep user choice
+      return { ...prev, mc_version: mcVersions[0] };
+    });
+  }, [selectedPlugin, mcVersions]);
+
+  // When the selected MC version changes, recommend the matching Java major.
+  useEffect(() => {
+    if (!selectedPlugin || javaMajors.length === 0) return;
+    setSchemaValues((prev) => {
+      const mc = prev.mc_version;
+      if (!mc) return prev;
+      const recommended = mcVersionToJavaMajor(mc);
+      // If the user has a Java version that still satisfies the MC requirement,
+      // don't override their choice — only step in when it's missing/incompatible.
+      const current = prev.java_version;
+      if (current && Number(current) >= Number(recommended)) return prev;
+      // Prefer an installed Java >= recommended; otherwise recommend the target.
+      const installed = javaMajors.find((m) => Number(m) >= Number(recommended));
+      return { ...prev, java_version: installed ?? recommended };
+    });
+  }, [selectedPlugin, javaMajors, schemaValues.mc_version]);
+
+  // Build an enriched schema: mc_version + java_version become live dropdowns.
+  // mc_version is ALWAYS a dropdown (even while loading) so the selector is
+  // visible the instant the user picks a plugin. While loading it shows a
+  // single "Loading…" option, then re-renders with the real list.
+  const enrichedSchema: SchemaField[] = useMemo(() => {
+    if (!selectedPlugin) return [];
+    return selectedPlugin.configSchema.map((field) => {
+      if (field.key === "mc_version") {
+        const options = mcVersions.length > 0 ? mcVersions : ["Loading versions…"];
+        return { ...field, type: "select", options };
+      }
+      if (field.key === "java_version") {
+        // Start with the curated set of common Java majors (newest-first) so the
+        // dropdown always offers versions that newer MC releases need — e.g. 25
+        // for MC 26.1+ — even if they aren't installed yet. Then merge in any
+        // detected installs so the user sees everything in one list.
+        const curated = ["25", "21", "17", "11", "8"];
+        const merged = [...javaMajors];
+        for (const c of curated) {
+          if (!merged.includes(c)) merged.push(c);
+        }
+        const options = merged.length > 0 ? merged : curated;
+        return { ...field, type: "select", options };
+      }
+      return field;
+    });
+  }, [selectedPlugin, mcVersions, javaMajors]);
+
   // Reset schema values when switching to a different plugin, so we don't
   // carry values from a previous schema into a new one.
   useEffect(() => {
@@ -85,7 +155,23 @@ export function ServerForm({ initial, onSubmit, onCancel }: ServerFormProps) {
 
     // Build overrides from whichever editor is active.
     const userOverrides: Record<string, string> = selectedPlugin
-      ? { ...schemaValues }
+      ? (() => {
+          // Seed every schema field with its manifest default first, so any
+          // {{userOverrides.*}} template in the manifest's lifecycle commands
+          // always resolves at launch — then overlay the values the user
+          // actually set in the form. Without this, untouched fields (e.g.
+          // java_path, jvm_args) are missing from the saved overrides and the
+          // launch command keeps the raw template string (e.g.
+          // "{{userOverrides.java_path}}"), which fails to spawn.
+          const seeded: Record<string, string> = {};
+          for (const field of selectedPlugin.configSchema) {
+            seeded[field.key] = field.default;
+          }
+          for (const [key, value] of Object.entries(schemaValues)) {
+            seeded[key] = value;
+          }
+          return seeded;
+        })()
       : (() => {
           const map: Record<string, string> = {};
           for (const row of overrides) {
@@ -182,26 +268,34 @@ export function ServerForm({ initial, onSubmit, onCancel }: ServerFormProps) {
           configuration
         </legend>
         {selectedPlugin ? (
-          <DynamicForm
-            schema={selectedPlugin.configSchema}
-            values={schemaValues}
-            onChange={(key, value) => {
-              setSchemaValues((prev) => {
-                const next = { ...prev, [key]: value };
-                // Cascade: when a field changes, update any field whose
-                // dependsOn points at it. e.g. entry follows runtime.
-                for (const field of selectedPlugin.configSchema) {
-                  if (field.dependsOn?.field === key) {
-                    const derived = field.dependsOn.defaults[value];
-                    if (derived !== undefined) {
-                      next[field.key] = derived;
+          <>
+            <DynamicForm
+              schema={enrichedSchema}
+              values={schemaValues}
+              onChange={(key, value) => {
+                setSchemaValues((prev) => {
+                  const next = { ...prev, [key]: value };
+                  // Cascade: when a field changes, update any field whose
+                  // dependsOn points at it. e.g. entry follows runtime.
+                  for (const field of selectedPlugin.configSchema) {
+                    if (field.dependsOn?.field === key) {
+                      const derived = field.dependsOn.defaults[value];
+                      if (derived !== undefined) {
+                        next[field.key] = derived;
+                      }
                     }
                   }
-                }
-                return next;
-              });
-            }}
-          />
+                  return next;
+                });
+              }}
+            />
+            {(versionsLoading || javaLoading) && (
+              <p className="mt-2 text-[10px] text-zinc-600">
+                {versionsLoading ? "fetching minecraft versions… " : ""}
+                {javaLoading ? "· detecting java…" : ""}
+              </p>
+            )}
+          </>
         ) : (
           <FreeFormOverrides
             rows={overrides}

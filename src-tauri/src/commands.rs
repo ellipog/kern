@@ -6,7 +6,10 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager};
 
@@ -301,10 +304,13 @@ fn run_step(app_handle: &AppHandle, id: &str, step_name: &str) -> Result<(), Str
     let step = lifecycle_step(&manifest, step_name, runtime)?;
 
     let command = process::resolve_variables(&step.command, &instance.user_overrides);
+    // Each manifest arg entry is templated, then shell-split so that a single
+    // entry like "{{userOverrides.jvm_args}}" (which expands to many -XX flags)
+    // becomes individual process arguments instead of one giant quoted string.
     let args: Vec<String> = step
         .args
         .iter()
-        .map(|a| process::resolve_variables(a, &instance.user_overrides))
+        .flat_map(|a| process::shell_split(&process::resolve_variables(a, &instance.user_overrides)))
         .collect();
 
     // Set a transient status like "starting", "installing", etc.
@@ -388,6 +394,177 @@ pub fn stop_server_instance(app_handle: AppHandle, id: String) -> Result<(), Str
     process::stop(&app_handle, &id)?;
     set_status(&app_handle, &id, "stopped")?;
     Ok(())
+}
+
+/// Runs an arbitrary command inside an instance's working directory and waits
+/// for it to complete. All stdout/stderr is streamed to `log:<id>:stream`
+/// events and appended to `latest.log`, exactly like a lifecycle step.
+///
+/// This is a synchronous (blocking) command — the frontend awaits it. It's
+/// designed for one-shot setup tasks such as running Fabric/Forge installers,
+/// or any plugin-driven installation step that needs to run a process and
+/// see its output in the terminal.
+///
+/// The process inherits the instance's `.env` environment variables. On
+/// failure the persisted status is set to "error" before the error is returned.
+#[tauri::command]
+pub fn run_instance_command(
+    app_handle: AppHandle,
+    id: String,
+    command: String,
+    args: Vec<String>,
+) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as StdCommand, Stdio};
+    use tauri::Emitter;
+
+    // 1. Load instance config.
+    let cfg = config::load_config(&app_handle)?;
+    let instance = cfg
+        .servers
+        .get(&id)
+        .ok_or_else(|| format!("server '{id}' not found"))?
+        .clone();
+    if instance.is_orphaned {
+        return Err(format!(
+            "instance '{id}' is orphaned (path missing): {}",
+            instance.path
+        ));
+    }
+
+    let working_dir = std::path::Path::new(&instance.path);
+    let log_path = working_dir.join("latest.log");
+
+    // 2. Build the command.
+    let mut cmd = StdCommand::new(&command);
+    cmd.current_dir(working_dir);
+    cmd.args(&args);
+    // Inherit host env and layer the instance's .env on top.
+    let env_path = working_dir.join(".env");
+    for (k, v) in parse_env_file(&env_path) {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    // 3. Set transient status.
+    set_status(&app_handle, &id, "setup")?;
+
+    // 4. Spawn.
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn '{command}': {e}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "spawned child has no stdout pipe".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "spawned child has no stderr pipe".to_string())?;
+
+    let event_name = format!("log:{id}:stream");
+
+    // 5. Read stdout and stderr concurrently using threads, forward to log.
+    //    We merge them into a single stream (same as the lifecycle process).
+    let handle = app_handle.clone();
+    let log_path_stdout = log_path.clone();
+    let event_out = event_name.clone();
+    let stdout_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().flatten() {
+            let stamped = forward_to_log(&handle, &event_out, &log_path_stdout, &line);
+            let _ = handle.emit(&event_out, stamped);
+        }
+    });
+
+    let handle_err = app_handle.clone();
+    let log_path_stderr = log_path.clone();
+    let event_err = event_name.clone();
+    let stderr_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().flatten() {
+            let stamped = forward_to_log(&handle_err, &event_err, &log_path_stderr, &line);
+            let _ = handle_err.emit(&event_err, stamped);
+        }
+    });
+
+    // 6. Wait for both readers to finish, then wait for the child to exit.
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait for child: {e}"))?;
+
+    // 7. Report result.
+    if status.success() {
+        set_status(&app_handle, &id, "stopped")?;
+        Ok(())
+    } else {
+        let code = status.code().map_or("unknown".to_string(), |c| c.to_string());
+        set_status(&app_handle, &id, "error")?;
+        Err(format!("command exited with code {code}"))
+    }
+}
+
+/// Formats the current wall-clock time as `[HH:MM:SS]`.
+fn timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut tod = secs % 86_400;
+    let h = (tod / 3600) % 24;
+    tod %= 3600;
+    let m = (tod / 60) % 60;
+    let s = tod % 60;
+    format!("[{h:02}:{m:02}:{s:02}]")
+}
+
+/// Appends a line to latest.log and returns a timestamped string for the event.
+fn forward_to_log(_handle: &AppHandle, _event_name: &str, log_path: &std::path::Path, line: &str) -> String {
+    let ts = timestamp();
+    let stamped = format!("{ts} {line}");
+    // Write to latest.log (best-effort).
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        let _ = writeln!(file, "{stamped}");
+    }
+    stamped
+}
+
+/// Parses a `.env` file into (key, value) pairs. Mirrors process.rs logic.
+fn parse_env_file(path: &std::path::Path) -> Vec<(String, String)> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut val = val.trim().to_string();
+        let bytes = val.as_bytes();
+        if bytes.len() >= 2
+            && (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'
+                || bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
+        {
+            val = val[1..val.len() - 1].to_string();
+        }
+        out.push((key.to_string(), val));
+    }
+    out
 }
 
 /// Writes data to a running instance's stdin stream.

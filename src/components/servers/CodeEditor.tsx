@@ -1,9 +1,11 @@
 /**
- * Monaco Editor wrapper with kern's custom dark theme.
+ * Monaco Editor wrapper with kern's custom dark theme, custom Monarch
+ * language definitions, format-on-save, and bracket-pair colorization.
  *
- * Thin layer over @monaco-editor/react that injects the design-system theme,
- * registers the Ctrl+S / Cmd+S save handler, and surfaces cursor position
- * changes via onCursorPosition for the status bar.
+ * The custom languages (env, properties, ignore, ini, log) are registered
+ * with Monaco at module level — before any Editor component mounts. This is
+ * required because Monaco only tokenizes a language after its Monarch
+ * provider is registered.
  */
 
 import { useRef, useCallback, useEffect } from "react";
@@ -11,19 +13,20 @@ import Editor, { loader, type OnMount } from "@monaco-editor/react";
 import * as monacoEditor from "monaco-editor";
 import type { editor } from "monaco-editor";
 import { KERN_THEME } from "./editorTheme";
+import { registerCustomLanguages } from "./monarchLanguages";
 
 // Configure Monaco to bundle inline (avoids web worker CORS issues in Tauri).
-// This must happen before any Editor component mounts, so we do it at module
-// level. The `loader.config({ monaco })` call tells the React wrapper to use
+// The `loader.config({ monaco })` call tells the React wrapper to use
 // the local bundle instead of fetching from CDN.
 loader.config({ monaco: monacoEditor });
 
-// Register the kern theme once the Monaco engine is ready.
-// This is safe to call multiple times (defineTheme is idempotent).
-function registerTheme() {
+// Register the kern theme and all custom Monarch languages at module level.
+// This must happen before any Editor component mounts.
+function initializeMonaco() {
   monacoEditor.editor.defineTheme("kern-dark", KERN_THEME);
+  registerCustomLanguages(monacoEditor);
 }
-registerTheme();
+initializeMonaco();
 
 interface CodeEditorProps {
   language: string;
@@ -32,11 +35,11 @@ interface CodeEditorProps {
   onSave: () => void;
   onCursorPosition?: (line: number, column: number) => void;
   path?: string;
+  readOnly?: boolean;
 }
 
 /**
  * Formats a Monaco cursor position event into line/column numbers.
- * Monaco uses 1-based line/column internally; we pass them raw.
  */
 function extractPosition(e: editor.ICursorPositionChangedEvent) {
   return {
@@ -52,18 +55,24 @@ export function CodeEditor({
   onSave,
   onCursorPosition,
   path,
+  readOnly = false,
 }: CodeEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const modelRef = useRef<editor.ITextModel | null>(null);
 
   const handleMount: OnMount = useCallback(
     (ed, monaco) => {
       editorRef.current = ed;
 
-      // Register the kern theme (if not already).
+      // Re-register theme and languages (idempotent — safe to call again).
       monaco.editor.defineTheme("kern-dark", KERN_THEME);
+      registerCustomLanguages(monaco);
       monaco.editor.setTheme("kern-dark");
 
-      // Register Ctrl+S / Cmd+S save action.
+      // Store model ref for proper disposal on unmount.
+      modelRef.current = ed.getModel() ?? null;
+
+      // Register Ctrl/Cmd+S save action.
       ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         onSave();
       });
@@ -77,15 +86,21 @@ export function CodeEditor({
       }
 
       // Focus the editor on mount so the user can start typing immediately.
-      ed.focus();
+      if (!readOnly) {
+        ed.focus();
+      }
     },
-    [onSave, onCursorPosition],
+    [onSave, onCursorPosition, readOnly],
   );
 
-  // When the active file changes, update the editor model.
+  // Cleanup: dispose the editor model when the component unmounts.
   useEffect(() => {
     return () => {
-      // Cleanup: dispose editor when component unmounts.
+      // Dispose the model to prevent memory leaks.
+      if (modelRef.current) {
+        modelRef.current.dispose();
+        modelRef.current = null;
+      }
       editorRef.current = null;
     };
   }, []);
@@ -105,6 +120,7 @@ export function CodeEditor({
         fontSize: 13,
         fontLigatures: true,
         lineHeight: 1.6,
+        readOnly,
 
         // Layout
         minimap: { enabled: true, maxColumn: 60, scale: 1 },
@@ -118,6 +134,17 @@ export function CodeEditor({
         tabSize: 2,
         insertSpaces: true,
         detectIndentation: true,
+        stickyScroll: { enabled: true },
+
+        // Formatting — format on paste and type.
+        // (formatOnSave is a VS Code concept; Monaco handles this via the
+        // save keybinding which calls our onSave handler.)
+        formatOnPaste: true,
+        formatOnType: true,
+
+        // Bracket pair colorization
+        bracketPairColorization: { enabled: true },
+        guides: { indentation: true, bracketPairs: true },
 
         // Scrolling
         smoothScrolling: true,
@@ -129,7 +156,7 @@ export function CodeEditor({
         overviewRulerLanes: 0,
         hideCursorInOverviewRuler: true,
 
-        // Selection
+        // Selection/cursor
         cursorBlinking: "smooth",
         cursorSmoothCaretAnimation: "on",
         cursorStyle: "line",
@@ -138,18 +165,18 @@ export function CodeEditor({
         autoClosingBrackets: "always",
         autoClosingQuotes: "always",
         autoIndent: "full",
-        formatOnPaste: true,
 
-        // Widgets
+        // Widgets/completion
         suggestOnTriggerCharacters: true,
         quickSuggestions: true,
         parameterHints: { enabled: true },
         codeLens: false,
+        accessibilitySupport: "on",
 
         // Misc
-        readOnly: false,
         renderValidationDecorations: "on",
         padding: { top: 8, bottom: 8 },
+        autoDetectHighContrast: true,
       }}
     />
   );
@@ -157,10 +184,9 @@ export function CodeEditor({
 
 /**
  * Ensures the kern Monaco theme is registered. Safe to call multiple times
- * since defineTheme is idempotent. The theme is already registered at module
- * level, but this export provides an explicit hook for callers who want to
- * guarantee registration before mounting an Editor component.
+ * since defineTheme is idempotent.
  */
 export function configureMonaco() {
-  registerTheme();
+  monacoEditor.editor.defineTheme("kern-dark", KERN_THEME);
+  registerCustomLanguages(monacoEditor);
 }

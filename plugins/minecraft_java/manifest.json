@@ -1,0 +1,140 @@
+{
+  "id": "minecraft_java",
+  "displayName": "Minecraft Java Server",
+  "version": "1.2.0",
+  "author": "kern/community",
+  "uiEntry": "dist/index.js",
+  "configSchema": [
+    {
+      "key": "runtime",
+      "label": "Server Software",
+      "type": "select",
+      "options": [
+        "vanilla",
+        "paper",
+        "purpur",
+        "fabric",
+        "forge",
+        "neoforge",
+        "quilt"
+      ],
+      "default": "purpur"
+    },
+    {
+      "key": "mc_version",
+      "label": "Minecraft Version",
+      "type": "text",
+      "default": "1.21"
+    },
+    {
+      "key": "java_version",
+      "label": "Java Version",
+      "type": "text",
+      "default": "21"
+    },
+    {
+      "key": "java_path",
+      "label": "Java Path",
+      "type": "text",
+      "default": "java"
+    },
+    {
+      "key": "jvm_args",
+      "label": "JVM Arguments",
+      "type": "text",
+      "default": "-Xms2G -Xmx2G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:MaxTenuringThreshold=1"
+    },
+    {
+      "key": "server_port",
+      "label": "Server Port",
+      "type": "text",
+      "default": "25565"
+    },
+    {
+      "key": "accept_eula",
+      "label": "Accept EULA",
+      "type": "select",
+      "options": [
+        "true",
+        "false"
+      ],
+      "default": "false"
+    }
+  ],
+  "lifecycle": {
+    "start": {
+      "command": "{{userOverrides.java_path}}",
+      "args": [
+        "{{userOverrides.jvm_args}}",
+        "-jar",
+        "server.jar",
+        "--nogui"
+      ]
+    },
+    "start.paper": {
+      "command": "{{userOverrides.java_path}}",
+      "args": [
+        "{{userOverrides.jvm_args}}",
+        "-jar",
+        "server.jar",
+        "--nogui"
+      ]
+    },
+    "start.purpur": {
+      "command": "{{userOverrides.java_path}}",
+      "args": [
+        "{{userOverrides.jvm_args}}",
+        "-jar",
+        "server.jar",
+        "--nogui"
+      ]
+    },
+    "start.fabric": {
+      "command": "{{userOverrides.java_path}}",
+      "args": [
+        "{{userOverrides.jvm_args}}",
+        "-jar",
+        "fabric-server-launch.jar",
+        "--nogui"
+      ]
+    },
+    "start.quilt": {
+      "command": "{{userOverrides.java_path}}",
+      "args": [
+        "{{userOverrides.jvm_args}}",
+        "-jar",
+        "quilt-server-launcher.jar",
+        "--nogui"
+      ]
+    },
+    "start.forge": {
+      "command": "{{userOverrides.java_path}}",
+      "args": [
+        "{{userOverrides.jvm_args}}",
+        "@user_jvm_args.txt",
+        "-jar",
+        "server.jar",
+        "--nogui"
+      ]
+    },
+    "start.neoforge": {
+      "command": "{{userOverrides.java_path}}",
+      "args": [
+        "{{userOverrides.jvm_args}}",
+        "-jar",
+        "server.jar",
+        "--nogui"
+      ]
+    }
+  },
+  "scaffold": {
+    "eula": {
+      "path": "eula.txt",
+      "content": "eula={{userOverrides.accept_eula}}\n"
+    },
+    "readme": {
+      "path": "README.txt",
+      "content": "Minecraft Server ({{userOverrides.mc_version}})\nSoftware: {{userOverrides.runtime}}\nJava: {{userOverrides.java_version}}\n\nUse the kern panel to start/stop this server.\nThe server JAR will be downloaded when you run auto-install.\n"
+    }
+  }
+}

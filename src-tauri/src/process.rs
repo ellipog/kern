@@ -184,6 +184,16 @@ fn parse_env_file(path: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// Splits a templated arg string on whitespace into individual arguments.
+///
+/// A single manifest arg entry like `{{userOverrides.jvm_args}}` expands to many
+/// `-XX` flags; without splitting it would be passed as one giant quoted string.
+/// JVM flags contain no spaces or shell metacharacters, so a plain whitespace
+/// split is sufficient.
+pub fn shell_split(input: &str) -> Vec<String> {
+    input.split_whitespace().map(String::from).collect()
+}
+
 /// Spawns a server instance's "start" lifecycle step with piped stdio.
 ///
 /// `working_dir` is where the process runs and where `latest.log` is written.

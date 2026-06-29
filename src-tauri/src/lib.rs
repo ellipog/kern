@@ -2,11 +2,14 @@
 
 mod commands;
 mod config;
+mod download;
+mod java;
 mod manifest;
 mod metrics;
 mod process;
 mod scaffold;
 mod seed;
+mod ui_state;
 mod window_state;
 
 use tauri::{Manager, WindowEvent};
@@ -76,6 +79,14 @@ pub fn run() {
             commands::get_plugin_ui_path,
             commands::install_plugin,
             commands::uninstall_plugin,
+            commands::run_instance_command,
+            download::download_url,
+            download::fetch_mc_versions,
+            java::detect_java,
+            java::check_java_version,
+            java::download_java,
+            ui_state::get_ui_state,
+            ui_state::set_ui_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

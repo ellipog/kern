@@ -1,4 +1,13 @@
-import { useMemo, useState } from "react";
+import {
+  useMemo,
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  createContext,
+  useContext,
+  type RefObject,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { AppShell } from "./components/layout/AppShell";
 import { ServerList } from "./components/servers/ServerList";
@@ -9,6 +18,7 @@ import { ErrorBoundary } from "./components/ui/ErrorBoundary";
 import { PluginManager } from "./components/plugins/PluginManager";
 import { useServers } from "./hooks/useServers";
 import { useLiveStatus } from "./hooks/useLiveStatus";
+import { UiStateProvider, useUiState } from "./hooks/useUiState";
 import type { NewServerInput, ServerInstance } from "./types/server";
 
 type View =
@@ -18,11 +28,42 @@ type View =
   | { kind: "edit"; server: ServerInstance }
   | { kind: "plugins" };
 
+/* ─── Bridge context for lifting selectedServerId up to the provider ───── */
+
+const SelectedIdBridgeContext = createContext<RefObject<(id: string | null) => void>>({
+  current: () => {},
+});
+
 /**
  * Root dashboard. Owns the active view (list / detail / create / edit) and
  * selection, delegates all persistence + process lifecycle to the Rust core.
+ *
+ * The outer `App` wraps everything in a `UiStateProvider` so that all child
+ * components can read/write persisted UI state. The inner `AppInner` does
+ * the actual work, using `useUiState()` to restore + persist view state.
  */
 export default function App() {
+  // selectedServerId lives in AppInner but must be passed to UiStateProvider.
+  // We lift it via local state + a bridge context so the provider always
+  // sees the current selection without re-rendering the whole tree.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const onChangeRef = useRef(setSelectedId);
+  onChangeRef.current = setSelectedId;
+
+  return (
+    <UiStateProvider selectedServerId={selectedId}>
+      <SelectedIdBridgeContext.Provider value={onChangeRef}>
+        <AppInner />
+      </SelectedIdBridgeContext.Provider>
+    </UiStateProvider>
+  );
+}
+
+/**
+ * Inner app component — owns all the real logic. Reads persisted UI state
+ * from the context and syncs view/selection changes back to it.
+ */
+function AppInner() {
   const {
     servers,
     loading,
@@ -33,6 +74,8 @@ export default function App() {
     refreshOrphaned,
     reload,
   } = useServers();
+  const { uiState, setView } = useUiState();
+  const bridgeRef = useContext(SelectedIdBridgeContext);
 
   // Overlay live process status onto the persisted list. The sidebar + main
   // list read persisted status, which only refreshes on explicit reload() and
@@ -51,8 +94,49 @@ export default function App() {
     [servers, liveStatus],
   );
 
+  // Local view state — initialized from persisted state once servers load.
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [view, setView] = useState<View>({ kind: "list" });
+  const [view, setViewLocal] = useState<View>({ kind: "list" });
+  const [restored, setRestored] = useState(false);
+
+  // Restore persisted view/selection once servers are loaded.
+  useEffect(() => {
+    if (loading || restored) return;
+    const savedView = uiState.activeViewKind;
+    const savedSelected = uiState.selectedServerId;
+    // Only restore "detail" if the selected server still exists.
+    if (
+      savedView === "detail" &&
+      savedSelected &&
+      servers.some((s) => s.id === savedSelected)
+    ) {
+      setSelectedId(savedSelected);
+      setViewLocal({ kind: "detail" });
+    } else if (savedView === "plugins") {
+      setViewLocal({ kind: "plugins" });
+    } else {
+      setViewLocal({ kind: "list" });
+    }
+    setRestored(true);
+  }, [loading, restored, uiState.activeViewKind, uiState.selectedServerId, servers]);
+
+  // Bridge selectedId changes up to the provider.
+  useEffect(() => {
+    bridgeRef.current(selectedId);
+  }, [selectedId, bridgeRef]);
+
+  // Persist view/selection changes.
+  const persistView = useCallback(
+    (kind: View["kind"], id: string | null) => {
+      setView(kind, id);
+    },
+    [setView],
+  );
+
+  const selected = useMemo(
+    () => serversLive.find((s) => s.id === selectedId) ?? null,
+    [serversLive, selectedId],
+  );
 
   // Confirmation dialog state — tracks the instance id pending deletion.
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -61,30 +145,29 @@ export default function App() {
     [serversLive, pendingDeleteId],
   );
 
-  const selected = useMemo(
-    () => serversLive.find((s) => s.id === selectedId) ?? null,
-    [serversLive, selectedId],
-  );
-
   function handleSelect(id: string) {
     if (selectedId === id && view.kind === "detail") {
       setSelectedId(null);
-      setView({ kind: "list" });
+      setViewLocal({ kind: "list" });
+      persistView("list", null);
     } else {
       setSelectedId(id);
-      setView({ kind: "detail" });
+      setViewLocal({ kind: "detail" });
+      persistView("detail", id);
     }
   }
 
   function handleEdit(server: ServerInstance) {
     setSelectedId(server.id);
-    setView({ kind: "edit", server });
+    setViewLocal({ kind: "edit", server });
+    persistView("edit", server.id);
   }
 
   async function handleCreate(input: NewServerInput) {
     const created = await createServer(input);
     setSelectedId(created.id);
-    setView({ kind: "detail" });
+    setViewLocal({ kind: "detail" });
+    persistView("detail", created.id);
   }
 
   async function handleUpdate(input: NewServerInput) {
@@ -96,7 +179,8 @@ export default function App() {
       path: input.path,
       userOverrides: input.userOverrides,
     });
-    setView({ kind: "detail" });
+    setViewLocal({ kind: "detail" });
+    persistView("detail", selected.id);
   }
 
   /** Opens the confirmation dialog instead of deleting immediately. */
@@ -117,13 +201,16 @@ export default function App() {
     if (deleteFolder) {
       try {
         await invoke("delete_server_folder", { id });
-      } catch { /* best-effort: still remove the registry entry below */ }
+      } catch {
+        /* best-effort: still remove the registry entry below */
+      }
     }
     setDeleteFolder(false);
     await deleteServer(id);
     if (selectedId === id) {
       setSelectedId(null);
-      setView({ kind: "list" });
+      setViewLocal({ kind: "list" });
+      persistView("list", null);
     }
   }
 
@@ -137,17 +224,26 @@ export default function App() {
     void reload();
   }
 
+  // Helper to set view + persist in one call.
+  const navigate = useCallback(
+    (kind: View["kind"]) => {
+      setViewLocal({ kind } as View);
+      persistView(kind, selectedId);
+    },
+    [persistView, selectedId],
+  );
+
   return (
     <AppShell
       servers={serversLive}
       selectedId={selectedId}
       loading={loading}
       onSelect={handleSelect}
-      onAdd={() => setView({ kind: "create" })}
-      onHome={() => setView({ kind: "list" })}
+      onAdd={() => navigate("create")}
+      onHome={() => navigate("list")}
       onRefresh={refreshOrphaned}
       showPlugins={view.kind === "plugins"}
-      onNavigatePlugins={() => setView({ kind: "plugins" })}
+      onNavigatePlugins={() => navigate("plugins")}
     >
       <ErrorBoundary>
         {view.kind === "detail" && selected ? (
@@ -158,7 +254,7 @@ export default function App() {
           <ServerDetailView
             key="detail"
             server={selected}
-            onBack={() => setView({ kind: "list" })}
+            onBack={() => navigate("list")}
             onStatusChange={handleStatusChange}
           />
         ) : (
@@ -177,13 +273,17 @@ export default function App() {
                 servers={serversLive}
                 onDelete={handleDelete}
                 onEdit={handleEdit}
-                onAdd={() => setView({ kind: "create" })}
+                onAdd={() => navigate("create")}
                 onSelect={handleSelect}
               />
             )}
 
             {view.kind === "create" && (
-              <ServerForm key="create" onSubmit={handleCreate} onCancel={() => setView({ kind: "list" })} />
+              <ServerForm
+                key="create"
+                onSubmit={handleCreate}
+                onCancel={() => navigate("list")}
+              />
             )}
 
             {view.kind === "edit" && (
@@ -191,12 +291,12 @@ export default function App() {
                 key="edit"
                 initial={view.server}
                 onSubmit={handleUpdate}
-                onCancel={() => setView({ kind: "detail" })}
+                onCancel={() => navigate("detail")}
               />
             )}
 
             {view.kind === "plugins" && (
-              <PluginManager key="plugins" onBack={() => setView({ kind: "list" })} />
+              <PluginManager key="plugins" onBack={() => navigate("list")} />
             )}
           </div>
         )}

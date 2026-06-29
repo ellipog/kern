@@ -8,13 +8,16 @@
  *   - Error/save-state banners
  *
  * Each `FileEditorPanel` owns an independent editor session via `useFileEditor`.
+ * Editor state (open files, expanded tree paths, cursor position) is persisted
+ * per-server via `useUiState` and restored on mount.
  */
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { FileTree } from "./FileTree";
 import { EditorTabBar } from "./EditorTabBar";
 import { CodeEditor, configureMonaco } from "./CodeEditor";
 import { useFileEditor } from "../../hooks/useFileEditor";
+import { useUiState } from "../../hooks/useUiState";
 
 interface FileEditorPanelProps {
   /** Server instance id — scopes all file operations. */
@@ -45,18 +48,101 @@ export function FileEditorPanel({ serverId }: FileEditorPanelProps) {
     listDirectory,
   } = useFileEditor(serverId);
 
-  // Expanded directory paths in the file tree.
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const { uiState, updateServer } = useUiState();
+
+  // ── Persisted per-server editor state ─────────────────────────────────
+  const serverUi = uiState.servers[serverId] ?? {
+    activeTab: "logs" as const,
+    pluginExpanded: true,
+    commandHistory: [],
+    editor: { openFiles: [], activeFile: null, expandedPaths: [], cursorLine: 1, cursorCol: 1 },
+  };
+  const editorUi = serverUi.editor;
+
+  // Expanded directory paths in the file tree — initialized from persisted state.
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
+    () => new Set(editorUi.expandedPaths),
+  );
   const [refreshTree, setRefreshTree] = useState(0);
-  const [cursorLine, setCursorLine] = useState(1);
-  const [cursorCol, setCursorCol] = useState(1);
+  const [cursorLine, setCursorLine] = useState(editorUi.cursorLine);
+  const [cursorCol, setCursorCol] = useState(editorUi.cursorCol);
+
+  // Track whether we've already restored the open-file session for this server.
+  const restoredRef = useRef(false);
+
+  // Restore open files on mount: reload each persisted path from disk.
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+
+    const paths = editorUi.openFiles;
+    if (paths.length === 0) return;
+
+    // Open files sequentially so the last one becomes active (matching the
+    // persisted activeFile). We don't await the final active-file set —
+    // openFile already sets active state internally.
+    let cancelled = false;
+    (async () => {
+      for (const relPath of paths) {
+        if (cancelled) break;
+        try {
+          await openFile(relPath);
+        } catch {
+          // File may have been deleted since last session — skip it.
+        }
+      }
+      // Set the final active file (in case an earlier open overrode it).
+      if (!cancelled && editorUi.activeFile && paths.includes(editorUi.activeFile)) {
+        setActiveFile(editorUi.activeFile);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // We intentionally run this only once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Wrapped actions
+  const handleSetActiveFile = useCallback(
+    (relPath: string | null) => {
+      setActiveFile(relPath);
+      // Persist the active-file change.
+      updateServer(serverId, {
+        editor: {
+          ...editorUi,
+          openFiles: Array.from(openFiles.keys()),
+          activeFile: relPath,
+          expandedPaths: Array.from(expandedPaths),
+          cursorLine,
+          cursorCol,
+        },
+      });
+    },
+    [setActiveFile, serverId, updateServer, editorUi, openFiles, expandedPaths, cursorLine, cursorCol],
+  );
+
   const handleOpenFile = useCallback(
     async (relPath: string) => {
       await openFile(relPath);
+      // Persist the new open-file set + active file.
+      const newOpenFiles = Array.from(openFiles.keys());
+      if (!openFiles.has(relPath)) {
+        newOpenFiles.push(relPath);
+      }
+      updateServer(serverId, {
+        editor: {
+          ...editorUi,
+          openFiles: newOpenFiles,
+          activeFile: relPath,
+          expandedPaths: Array.from(expandedPaths),
+          cursorLine,
+          cursorCol,
+        },
+      });
     },
-    [openFile],
+    [openFile, openFiles, serverId, updateServer, editorUi, expandedPaths, cursorLine, cursorCol],
   );
 
   const handleCloseFile = useCallback(
@@ -68,8 +154,21 @@ export function FileEditorPanel({ serverId }: FileEditorPanelProps) {
         return;
       }
       closeFile(relPath);
+      // Persist the updated open-file set.
+      const newOpenFiles = Array.from(openFiles.keys()).filter((p) => p !== relPath);
+      const newActive = activeFile === relPath ? (newOpenFiles[newOpenFiles.length - 1] ?? null) : activeFile;
+      updateServer(serverId, {
+        editor: {
+          ...editorUi,
+          openFiles: newOpenFiles,
+          activeFile: newActive,
+          expandedPaths: Array.from(expandedPaths),
+          cursorLine,
+          cursorCol,
+        },
+      });
     },
-    [openFiles, saveFile, closeFile],
+    [openFiles, saveFile, closeFile, activeFile, serverId, updateServer, editorUi, expandedPaths, cursorLine, cursorCol],
   );
 
   const handleSave = useCallback(async () => {
@@ -85,13 +184,28 @@ export function FileEditorPanel({ serverId }: FileEditorPanelProps) {
     [activeFile, setFileContent],
   );
 
-  const handleCursorPosition = useCallback((line: number, column: number) => {
-    setCursorLine(line);
-    setCursorCol(column);
-  }, []);
+  const handleCursorPosition = useCallback(
+    (line: number, column: number) => {
+      setCursorLine(line);
+      setCursorCol(column);
+      // Persist cursor position (lightweight — fires on every move, but
+      // the debounced save in useUiState coalesces the writes).
+      updateServer(serverId, {
+        editor: {
+          ...editorUi,
+          openFiles: Array.from(openFiles.keys()),
+          activeFile,
+          expandedPaths: Array.from(expandedPaths),
+          cursorLine: line,
+          cursorCol: column,
+        },
+      });
+    },
+    [serverId, updateServer, editorUi, openFiles, activeFile, expandedPaths],
+  );
 
   const handleToggleExpand = useCallback(
-    async (relPath: string) => {
+    (relPath: string) => {
       setExpandedPaths((prev) => {
         const next = new Set(prev);
         if (next.has(relPath)) {
@@ -99,10 +213,21 @@ export function FileEditorPanel({ serverId }: FileEditorPanelProps) {
         } else {
           next.add(relPath);
         }
+        // Persist the updated expansion state.
+        updateServer(serverId, {
+          editor: {
+            ...editorUi,
+            openFiles: Array.from(openFiles.keys()),
+            activeFile,
+            expandedPaths: Array.from(next),
+            cursorLine,
+            cursorCol,
+          },
+        });
         return next;
       });
     },
-    [],
+    [serverId, updateServer, editorUi, openFiles, activeFile, cursorLine, cursorCol],
   );
 
   // Trigger a tree refresh when openFiles size changes (file was created/deleted).
@@ -154,7 +279,7 @@ export function FileEditorPanel({ serverId }: FileEditorPanelProps) {
             <EditorTabBar
               tabs={tabs}
               activeFile={activeFile}
-              onSelect={setActiveFile}
+              onSelect={handleSetActiveFile}
               onClose={handleCloseFile}
               onSave={handleSave}
             />
@@ -168,6 +293,7 @@ export function FileEditorPanel({ serverId }: FileEditorPanelProps) {
                   onSave={handleSave}
                   onCursorPosition={handleCursorPosition}
                   path={activeFile ?? undefined}
+                  readOnly={false}
                 />
               )}
             </div>
