@@ -1,5 +1,6 @@
 import type { ServerInstance } from "../../types/server";
 import { statusColor, statusHex } from "../servers/status";
+import { useSidebarItems } from "../../hooks/useSidebarItems";
 
 interface SidebarProps {
   servers: ServerInstance[];
@@ -29,6 +30,8 @@ export function Sidebar({
   showPlugins,
   onNavigatePlugins,
 }: SidebarProps) {
+  const { items: pluginItems } = useSidebarItems();
+
   return (
     <aside className="flex flex-col w-60 border-r border-grid-bounds matrix-border bg-bg-surface">
       <div className="flex items-center justify-between px-3 py-2 border-b border-grid-bounds">
@@ -102,6 +105,24 @@ export function Sidebar({
           })}
         </ul>
       </nav>
+
+      {/* Plugin sidebar items */}
+      {pluginItems.length > 0 && (
+        <nav className="border-t border-grid-bounds">
+          {pluginItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => item.onClick()}
+              className="flex w-full items-center gap-2 px-3 py-2.5 text-left border-l-2 border-transparent hover:bg-bg-core hover:border-signal-low transition-colors"
+            >
+              {item.icon && (
+                <span className="text-[11px] text-zinc-500">{item.icon}</span>
+              )}
+              <span className="flex-1 text-xs text-zinc-400">{item.label}</span>
+            </button>
+          ))}
+        </nav>
+      )}
 
       {/* Bottom navigation */}
       <nav className="border-t border-grid-bounds">

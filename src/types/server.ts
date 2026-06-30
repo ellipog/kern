@@ -7,6 +7,21 @@
 /** Lifecycle of a tracked server instance. */
 export type ServerStatus = "stopped" | "starting" | "running" | "stopping" | "installing" | "error";
 
+/**
+ * Fields an instance can be sorted by. Mirrors `ServerInstance`:
+ *   name → human-readable label
+ *   serverType → plugin id backing the instance (e.g. "web_server")
+ *   status → lifecycle state (running, stopped, error…)
+ *   path → absolute filesystem path to the working directory
+ */
+export type SortKey = "name" | "serverType" | "status" | "path";
+
+/** A complete sort preference: which field, and which direction. */
+export interface SortPref {
+  key: SortKey;
+  direction: "asc" | "desc";
+}
+
 /** A tracked server instance in config.json. */
 export interface ServerInstance {
   /** Stable identifier, e.g. "srv_9f82b1a0". */

@@ -14,6 +14,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// A static tab declaration in the manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginTabInfo {
+    pub id: String,
+    pub label: String,
+}
+
 /// A plugin manifest.json document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +44,11 @@ pub struct Manifest {
     /// (e.g. "main", "package_json", "cargo_toml"). See ScaffoldFile.
     #[serde(default)]
     pub scaffold: std::collections::HashMap<String, ScaffoldFile>,
+    /// Optional static tab declarations.
+    /// These describe tabs the plugin may register dynamically at runtime.
+    /// The actual mount functions are provided via the JS bundle.
+    #[serde(default)]
+    pub tabs: Vec<PluginTabInfo>,
 }
 
 /// One configurable field in the manifest's configSchema.

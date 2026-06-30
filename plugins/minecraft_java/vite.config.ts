@@ -3,7 +3,7 @@ import { resolve } from "path";
 import fs from "fs";
 
 /**
- * Vite library mode inlines CSS into the JS bundle. The PluginWrapper
+ * Vite library mode inlines CSS into the JS bundle. PluginBoot
  * expects a separate `dist/index.css` file alongside the JS entry.
  * This plugin copies the source CSS after the build so the host can
  * load it via `<link>` in the shadow DOM.

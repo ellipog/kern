@@ -3,12 +3,14 @@
  *
  * Exports mount() and unmount() as required by the Kern plugin system.
  *
- * Layout: two collapsible sections -
- *   1. Setup  - the installer wizard (version, Java, RAM, install button)
- *   2. Server - the live dashboard (chat, players, quick commands)
+ * The plugin contributes to the host UI through extension points:
+ *   - "Setup" tab — the installer wizard (version, Java, RAM, install)
+ *   - "Chat" tab  — live chat log + player list
  *
- * The Server section subscribes to backend events via hostAPI.listen() to
+ * The server section subscribes to backend events via hostAPI.listen() to
  * receive live log output and status changes from the running MC process.
+ *
+ * Each tab renders a full tab-page layout matching the kern design system.
  */
 
 import type { ServerInstance, HostAPI, JavaInstall, InstallStep, UnlistenFn, StatusPayload } from "./types";
@@ -34,8 +36,6 @@ interface WizardState {
   javaMajor: number;
   javaMissing: boolean;
   downloadingJava: boolean;
-  setupExpanded: boolean;
-  serverExpanded: boolean;
   running: boolean;
   chatLines: string[];
   players: string[];
@@ -48,6 +48,10 @@ interface WizardState {
 
 let state: WizardState | null = null;
 let rootEl: HTMLElement | null = null;
+
+// Tab update hooks — called from render() so plugin-registered tabs stay in sync.
+// Keyed by tab id so each tab only removes its own entry on unmount.
+let tabUpdateFns = new Map<string, () => void>();
 
 
 function $<T extends HTMLElement = HTMLDivElement>(
@@ -66,7 +70,7 @@ function cls(...names: string[]): string { return names.filter(Boolean).join(" "
 
 declare global { interface Element { tap(fn: (el: this) => void): this; } }
 if (!Element.prototype.tap) {
-  Element.prototype.tap = function<T extends Element>(this: T, fn: (el: T) => void): T { fn(this); return this; };
+  Element.prototype.tap = function <T extends Element>(this: T, fn: (el: T) => void): T { fn(this); return this; };
 }
 
 const RUNTIME_LABELS: Record<string, string> = {
@@ -77,7 +81,7 @@ const RAM_PRESETS = [1, 2, 4, 6, 8, 12, 16];
 
 function getDefaultHeapGb(runtime: string): number {
   return runtime === "forge" || runtime === "neoforge" ? 4 :
-         runtime === "fabric" || runtime === "quilt" ? 3 : 2;
+    runtime === "fabric" || runtime === "quilt" ? 3 : 2;
 }
 
 function getDefaultJvmArgs(runtime: string): string {
@@ -113,9 +117,13 @@ function persistOverride(hostAPI: HostAPI, serverData: ServerInstance, key: stri
 
 function heapTier(runtime: string): string {
   return runtime === "forge" || runtime === "neoforge" ? "heavy (4 GB)" :
-         runtime === "fabric" || runtime === "quilt" ? "moderate (3 GB)" : "lightweight (2 GB)";
+    runtime === "fabric" || runtime === "quilt" ? "moderate (3 GB)" : "lightweight (2 GB)";
 }
 
+
+/* ─────────────────────────────────────────────────
+ *  mount / unmount
+ * ───────────────────────────────────────────────── */
 
 export async function mount(
   mountPoint: HTMLElement, serverData: ServerInstance, hostAPI: HostAPI,
@@ -143,7 +151,7 @@ export async function mount(
     mcVersion, mcVersions: [], fetchingVersions: true,
     includeSnapshots: false, installing: false, installSteps: [],
     installLog: [], installError: false, javaMajor, javaMissing,
-    downloadingJava: false, setupExpanded: true, serverExpanded: true,
+    downloadingJava: false,
     running: false, chatLines: [], players: [], playerCount: "",
     chatInput: "", unlistenLog: null, unlistenStatus: null, pollTimer: null,
   };
@@ -152,6 +160,42 @@ export async function mount(
   await fetchAndSetVersions(runtime, false);
   subscribeToServer();
   void checkRunning();
+
+  // ── Register "Setup" tab ────────────────────────────────────
+  hostAPI.registerTab({
+    id: "mc-setup",
+    label: "Setup",
+    mount: (el) => {
+      const update = () => {
+        if (!state) return;
+        el.innerHTML = "";
+        el.appendChild(renderSetupTab());
+      };
+      tabUpdateFns.set("mc-setup", update);
+      update();
+    },
+    unmount: () => {
+      tabUpdateFns.delete("mc-setup");
+    },
+  });
+
+  // ── Register "Chat" tab ─────────────────────────────────────
+  hostAPI.registerTab({
+    id: "mc-chat",
+    label: "Chat",
+    mount: (el) => {
+      const update = () => {
+        if (!state) return;
+        el.innerHTML = "";
+        el.appendChild(renderChatTab());
+      };
+      tabUpdateFns.set("mc-chat", update);
+      update();
+    },
+    unmount: () => {
+      tabUpdateFns.delete("mc-chat");
+    },
+  });
 }
 
 export function unmount(): void {
@@ -284,173 +328,240 @@ async function fetchAndSetVersions(runtime: string, includeSnapshots: boolean): 
 }
 
 
+/* ─────────────────────────────────────────────────
+ *  render — called on every state change
+ *  Iterates tab update functions so active tabs
+ *  re-render their full tab-page content.
+ * ───────────────────────────────────────────────── */
+
 function render(): void {
-  if (!rootEl || !state) return;
-  rootEl.innerHTML = "";
-  rootEl.appendChild($("div", { class: "mc-wizard" }, [
-    renderHeader(),
-    renderSetupSection(),
-    renderServerSection(),
-  ]));
-}
-
-function renderHeader(): HTMLElement {
-  return $("div", { class: "mc-header" }, [
-    $("h2", { class: "mc-title" }, [`⛏ ${state!.serverData.name}`]),
-    $("span", { class: "mc-subtitle" }, [
-      `Server type: ${state!.serverData.serverType}`,
-      `  ·  Path: ${state!.serverData.path}`,
-    ]),
-  ]);
-}
-
-function renderSetupSection(): HTMLElement {
-  const s = state!;
-  const chevron = s.setupExpanded ? "▼" : "▶";
-  const header = $("div", { class: "mc-section-header" }, [
-    $("span", { class: "mc-section-chevron" }, [chevron]),
-    $("span", { class: "mc-section-title" }, ["Setup"]),
-  ]);
-  header.addEventListener("click", () => {
-    if (!state) return;
-    state.setupExpanded = !state.setupExpanded;
-    render();
-  });
-
-  const body = $("div", { class: cls("mc-section-body", s.setupExpanded ? "" : "mc-section-hidden") }, [
-    renderVersionSelector(),
-    renderConfigGrid(),
-    renderJavaSection(),
-    renderActionButtons(),
-  ]);
-  return $("div", { class: "mc-section" }, [header, body]);
-}
-
-function renderServerSection(): HTMLElement {
-  const s = state!;
-  const chevron = s.serverExpanded ? "▼" : "▶";
-  const header = $("div", { class: "mc-section-header" }, [
-    $("span", { class: "mc-section-chevron" }, [chevron]),
-    $("span", { class: "mc-section-title" }, ["Server"]),
-    s.running
-      ? $("span", { class: "mc-status-dot mc-status-running" }, ["•"])
-      : $("span", { class: "mc-status-dot mc-status-stopped" }, ["•"]),
-  ]);
-  header.addEventListener("click", () => {
-    if (!state) return;
-    state.serverExpanded = !state.serverExpanded;
-    render();
-  });
-
-  const body = $("div", { class: cls("mc-section-body", s.serverExpanded ? "" : "mc-section-hidden") }, [
-    s.running ? renderDashboardContent() : renderNotRunning(),
-  ]);
-  return $("div", { class: "mc-section" }, [header, body]);
-}
-
-function renderNotRunning(): HTMLElement {
-  return $("div", { class: "mc-server-empty" }, [
-    $("p", { class: "mc-server-empty-text" }, [
-      "Server is not running. Start it from the controls above to see live data.",
-    ]),
-  ]);
+  if (!state) return;
+  for (const fn of tabUpdateFns.values()) fn();
 }
 
 
-function renderDashboardContent(): HTMLElement {
+/* ═════════════════════════════════════════════════
+ *  SETUP TAB — full tab page
+ * ═════════════════════════════════════════════════ */
+
+function renderSetupTab(): HTMLElement {
   const s = state!;
   const overrides = s.serverData.userOverrides ?? {};
   const runtime = overrides.runtime || "paper";
   const runtimeLabel = RUNTIME_LABELS[runtime] || runtime;
 
-  return $("div", { class: "mc-server-dashboard" }, [
-    $("div", { class: "mc-server-status-bar" }, [
-      $("span", { class: "mc-server-status-item" }, [
-        $("span", { class: "mc-status-dot mc-status-running" }, ["•"]),
-        $("span", {}, ["running"]),
-      ]),
-      $("span", { class: "mc-server-status-item" }, [runtimeLabel]),
-      $("span", { class: "mc-server-status-item" }, [overrides.mc_version || "unknown"]),
-      $("span", { class: "mc-server-status-item" }, [`Port ${overrides.server_port || "25565"}`]),
-    ]),
-    $("div", { class: "mc-server-grid" }, [
-      $("div", { class: "mc-chat-column" }, [
-        $("div", { class: "mc-chat-header" }, ["Chat"]),
-        $("div", { class: "mc-chat-log" },
-          s.chatLines.length === 0
-            ? [$("div", { class: "mc-chat-empty" }, ["No messages yet…"])]
-            : s.chatLines.slice(-50).map((line) =>
-                $("div", { class: "mc-chat-line" }, [line])
-              )
-        ),
-        $("div", { class: "mc-chat-input-row" }, [
-          $<HTMLInputElement>("input", {
-            class: "mc-chat-input", type: "text",
-            placeholder: "Type a message or /command...",
-            value: s.chatInput,
-          }).tap((input) => {
-            input.addEventListener("input", () => { if (state) state.chatInput = input.value; });
-            input.addEventListener("keydown", (e) => {
-              if (e.key === "Enter" && state) {
-                const msg = state.chatInput.trim();
-                if (msg) {
-                  if (msg.startsWith("/")) { void sendCommand(msg.slice(1)); }
-                  else { void sendChat(msg); }
-                  state.chatInput = "";
-                }
-              }
-            });
-          }),
-          $("button", { class: "mc-btn mc-btn-sm", type: "button" }, ["send"]).tap((btn) => {
-            btn.addEventListener("click", () => {
-              if (!state) return;
-              const msg = state.chatInput.trim();
-              if (msg) {
-                if (msg.startsWith("/")) { void sendCommand(msg.slice(1)); }
-                else { void sendChat(msg); }
-                state.chatInput = "";
-              }
-            });
-          }),
-        ]),
-      ]),
-      $("div", { class: "mc-players-column" }, [
-        $("div", { class: "mc-players-header" }, [
-          $("span", {}, [`Players${s.playerCount ? ` (${s.playerCount})` : ""}`]),
-          $("button", { class: "mc-btn mc-btn-sm", type: "button" }, ["↻"]).tap((btn) => {
-            btn.addEventListener("click", () => { void sendCommand("list"); });
-          }),
-        ]),
-        $("div", { class: "mc-player-list" },
-          s.players.length === 0
-            ? [$("div", { class: "mc-player-empty" }, ["No players online"])]
-            : s.players.map((name) =>
-                $("div", { class: "mc-player-item" }, [
-                  $("span", { class: "mc-player-dot" }, ["•"]),
-                  $("span", { class: "mc-player-name" }, [name]),
-                ])
-              )
-        ),
+  return $("div", { class: "mc-tab mc-setup-tab" }, [
+    // ── Tab header ──────────────────────────────────
+    $("div", { class: "mc-tab-header" }, [
+      $("span", { class: "mc-tab-header-icon" }, ["⛏"]),
+      $("span", { class: "mc-tab-header-title" }, ["Setup"]),
+      $("span", { class: "mc-tab-header-badge" }, [runtimeLabel]),
+      $("span", { class: "mc-tab-header-sub" }, [
+        s.mcVersion ? `v${s.mcVersion}` : "",
       ]),
     ]),
-    $("div", { class: "mc-quick-cmds" }, [
-      $("span", { class: "mc-quick-cmds-label" }, ["Quick:"]),
-      ...[
-        { label: "list", cmd: "list" },
-        { label: "save", cmd: "save-all" },
-        { label: "day", cmd: "time set day" },
-        { label: "night", cmd: "time set night" },
-        { label: "clear", cmd: "weather clear" },
-        { label: "rain", cmd: "weather rain" },
-      ].map(({ label, cmd }) =>
-        $("button", { class: "mc-btn mc-btn-sm mc-quick-cmd", type: "button" }, [label]).tap((btn) => {
-          btn.addEventListener("click", () => { void sendCommand(cmd); });
-        })
-      ),
+    // ── Scrollable body ──────────────────────────────
+    $("div", { class: "mc-tab-body" }, [
+      // Version section
+      $("div", { class: "mc-section" }, [
+        $("div", { class: "mc-section-header" }, [
+          $("span", { class: "mc-section-title" }, ["Version"]),
+        ]),
+        $("div", { class: "mc-section-body" }, [
+          renderVersionSelector(),
+        ]),
+      ]),
+      // Configuration section
+      $("div", { class: "mc-section" }, [
+        $("div", { class: "mc-section-header" }, [
+          $("span", { class: "mc-section-title" }, ["Configuration"]),
+        ]),
+        $("div", { class: "mc-section-body" }, [
+          renderConfigGrid(),
+        ]),
+      ]),
+      // Java section
+      $("div", { class: "mc-section" }, [
+        $("div", { class: "mc-section-header" }, [
+          $("span", { class: "mc-section-title" }, ["Java Runtime"]),
+        ]),
+        $("div", { class: "mc-section-body" }, [
+          renderJavaSection(),
+        ]),
+      ]),
+      // Install
+      $("div", { class: "mc-section" }, [
+        $("div", { class: "mc-section-header" }, [
+          $("span", { class: "mc-section-title" }, ["Installation"]),
+        ]),
+        $("div", { class: "mc-section-body" }, [
+          renderInstallSection(),
+        ]),
+      ]),
     ]),
   ]);
 }
 
+
+/* ═════════════════════════════════════════════════
+ *  CHAT TAB — full tab page
+ * ═════════════════════════════════════════════════ */
+
+function renderChatTab(): HTMLElement {
+  const s = state!;
+  const overrides = s.serverData.userOverrides ?? {};
+  const runtime = overrides.runtime || "paper";
+  const runtimeLabel = RUNTIME_LABELS[runtime] || runtime;
+
+  return $("div", { class: "mc-tab mc-chat-tab" }, [
+    // ── Status bar ───────────────────────────────────
+    renderChatStatusBar(s.running, runtimeLabel, overrides),
+    // ── Main layout ──────────────────────────────────
+    $("div", { class: "mc-chat-layout" }, [
+      // Chat column
+      $("div", { class: "mc-chat-column" }, [
+        renderChatLog(),
+        renderChatInput(),
+      ]),
+      // Players column
+      renderPlayersColumn(),
+    ]),
+  ]);
+}
+
+function renderChatStatusBar(
+  running: boolean, runtimeLabel: string, overrides: Record<string, string>,
+): HTMLElement {
+  const items: HTMLElement[] = [];
+
+  // Status dot + label
+  const dot = $("span", {
+    class: cls("mc-status-dot", running ? "mc-status-dot-running" : "mc-status-dot-stopped"),
+  });
+  const statusText = $("span", {
+    class: cls("mc-status-text", running ? "" : "mc-status-text-stopped"),
+  }, [running ? "running" : "stopped"]);
+  items.push($("span", { class: "mc-chat-status-item" }, [dot, statusText]));
+
+  items.push($("div", { class: "mc-chat-status-divider" }));
+
+  // Runtime
+  items.push($("span", { class: "mc-chat-status-item" }, [runtimeLabel]));
+
+  // Version
+  if (overrides.mc_version) {
+    items.push($("span", { class: "mc-chat-status-item" }, [`v${overrides.mc_version}`]));
+  }
+
+  // Port
+  items.push($("span", { class: "mc-chat-status-item" }, [`Port ${overrides.server_port || "25565"}`]));
+
+  // Player count (if running)
+  if (running && s.playerCount) {
+    items.push($("div", { class: "mc-chat-status-divider" }));
+    items.push($("span", { class: "mc-chat-status-item" }, [`${s.playerCount} players`]));
+  }
+
+  return $("div", { class: "mc-chat-status" }, items);
+}
+
+function renderChatLog(): HTMLElement {
+  const s = state!;
+  const log = $("div", { class: "mc-chat-log" });
+
+  if (s.chatLines.length === 0) {
+    log.appendChild($("div", { class: "mc-chat-empty" }, [
+      s.running ? "Waiting for chat messages…" : "Start the server to see chat activity.",
+    ]));
+  } else {
+    for (const line of s.chatLines.slice(-100)) {
+      log.appendChild($("div", { class: "mc-chat-line" }, [line]));
+    }
+  }
+
+  // Auto-scroll to bottom
+  requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+
+  return log;
+}
+
+function renderChatInput(): HTMLElement {
+  const s = state!;
+  const row = $("div", { class: "mc-chat-input-row" });
+
+  const input = $<HTMLInputElement>("input", {
+    class: "mc-chat-input", type: "text",
+    placeholder: s.running ? "Type a message or /command..." : "Server stopped — start to chat",
+    value: s.chatInput,
+  });
+  input.disabled = !s.running;
+
+  input.addEventListener("input", () => { if (state) state.chatInput = input.value; });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && state && state.running) {
+      handleChatSubmit();
+    }
+  });
+
+  const sendBtn = $("button", { class: "mc-btn mc-btn-sm", type: "button" }, ["send"]);
+  sendBtn.tap((btn) => {
+    btn.addEventListener("click", () => { if (state && state.running) handleChatSubmit(); });
+  });
+  if (!s.running) { sendBtn.setAttribute("disabled", "true"); }
+
+  row.appendChild(input);
+  row.appendChild(sendBtn);
+  return row;
+}
+
+function handleChatSubmit(): void {
+  if (!state) return;
+  const msg = state.chatInput.trim();
+  if (!msg) return;
+  if (msg.startsWith("/")) {
+    void sendCommand(msg.slice(1));
+  } else {
+    void sendChat(msg);
+  }
+  if (state) {
+    state.chatInput = "";
+    render();
+  }
+}
+
+function renderPlayersColumn(): HTMLElement {
+  const s = state!;
+  const col = $("div", { class: "mc-players-column" });
+
+  // Header
+  const header = $("div", { class: "mc-players-header" }, [
+    $("span", {}, [`Players${s.playerCount ? ` (${s.playerCount})` : ""}`]),
+    $("button", { class: "mc-btn mc-btn-sm", type: "button" }, ["↻"]).tap((btn) => {
+      btn.addEventListener("click", () => { void sendCommand("list"); });
+    }),
+  ]);
+  col.appendChild(header);
+
+  // Player list
+  const list = $("div", { class: "mc-player-list" });
+  if (s.players.length === 0) {
+    list.appendChild($("div", { class: "mc-player-empty" }, ["No players online"]));
+  } else {
+    for (const name of s.players) {
+      list.appendChild($("div", { class: "mc-player-item" }, [
+        $("span", { class: "mc-player-dot" }),
+        $("span", { class: "mc-player-name" }, [name]),
+      ]));
+    }
+  }
+  col.appendChild(list);
+
+  return col;
+}
+
+/* ═════════════════════════════════════════════════
+ *  Shared component render functions
+ * ═════════════════════════════════════════════════ */
 
 function renderVersionSelector(): HTMLElement {
   const s = state!;
@@ -458,8 +569,8 @@ function renderVersionSelector(): HTMLElement {
   const runtime = overrides.runtime || "paper";
 
   const select = $<HTMLSelectElement>("select", {
-    class: cls("mc-ver-select", s.fetchingVersions ? "mc-ver-loading" : ""),
-    disabled: undefined,
+    class: cls("mc-ver-select", s.fetchingVersions ? "mc-ver-select" : ""),
+    disabled: s.fetchingVersions ? "true" : undefined,
   });
 
   if (s.fetchingVersions) {
@@ -505,32 +616,33 @@ function renderVersionSelector(): HTMLElement {
   const refreshBtn = $<HTMLButtonElement>("button", {
     class: cls("mc-btn", "mc-btn-sm", s.fetchingVersions ? "mc-btn-disabled" : ""),
     type: "button",
-    disabled: s.fetchingVersions ? "true" : undefined,
-  }, ["↻"]);
+  });
+  refreshBtn.textContent = "↻";
   refreshBtn.addEventListener("click", async () => {
     if (!state || state.fetchingVersions) return;
     await fetchAndSetVersions(runtime, state.includeSnapshots);
   });
+  if (s.fetchingVersions) { refreshBtn.setAttribute("disabled", "true"); }
 
-  return $("div", { class: "mc-subsection" }, [
-    $("div", { class: "mc-subsection-title" }, ["Version Selection"]),
-    $("div", { class: "mc-ver-row" }, [
-      $("span", { class: "mc-ver-badge" }, [RUNTIME_LABELS[runtime] || runtime]),
-      s.fetchingVersions
-        ? $("span", { class: "mc-ver-spinner" }, ["◳"])
-        : $("span", { style: "display:none" }),
-      select, toggle, refreshBtn,
-    ]),
-    $("span", { class: "mc-ver-hint" }, [
-      s.fetchingVersions
-        ? "Fetching available versions…"
-        : s.mcVersions.length > 0
-          ? `${s.mcVersions.length} version(s) available`
-          : "Could not fetch versions. Check your internet connection.",
-    ]),
+  const versionRow = $("div", { class: "mc-version-row" }, [
+    $("span", { class: "mc-ver-badge" }, [RUNTIME_LABELS[runtime] || runtime]),
+    s.fetchingVersions
+      ? $("span", { class: "mc-ver-spinner" }, ["◳"])
+      : $("span", { style: "display:none" }),
+    select, toggle, refreshBtn,
+  ]);
+
+  const hintText = s.fetchingVersions
+    ? "Fetching available versions…"
+    : s.mcVersions.length > 0
+      ? `${s.mcVersions.length} version(s) available`
+      : "Could not fetch versions. Check your internet connection.";
+
+  return $("div", {}, [
+    versionRow,
+    $("span", { class: "mc-ver-hint" }, [hintText]),
   ]);
 }
-
 
 function renderConfigGrid(): HTMLElement {
   const s = state!;
@@ -542,7 +654,7 @@ function renderConfigGrid(): HTMLElement {
   const usingRecommended = currentJvm === recommendedJvm;
   const currentHeap = getHeapFromJvmArgs(currentJvm) || getDefaultHeapGb(runtime);
 
-  const ramSelect = $<HTMLSelectElement>("select", { class: "mc-ram-select" });
+  const ramSelect = $<HTMLSelectElement>("select", { class: "mc-select" });
   for (const gb of RAM_PRESETS) {
     const opt = $<HTMLOptionElement>("option", { value: String(gb) }, [`${gb} GB`]);
     if (gb === currentHeap) opt.selected = true;
@@ -559,28 +671,24 @@ function renderConfigGrid(): HTMLElement {
     render();
   });
 
-  return $("div", { class: "mc-subsection" }, [
-    $("div", { class: "mc-subsection-title" }, ["Configuration"]),
-    $("div", { class: "mc-config-grid" }, [
-      $("div", { class: "mc-config-item" }, [
-        $("span", { class: "mc-config-label" }, ["Server Port"]),
-        $("span", { class: "mc-config-value" }, [overrides.server_port || "25565"]),
+  return $("div", { class: "mc-config-grid" }, [
+    $("div", { class: "mc-config-item" }, [
+      $("span", { class: "mc-config-label" }, ["Server Port"]),
+      $("span", { class: "mc-config-value" }, [overrides.server_port || "25565"]),
+    ]),
+    $("div", { class: "mc-config-item" }, [
+      $("span", { class: "mc-config-label" }, ["RAM"]),
+      ramSelect,
+    ]),
+    $("div", { class: "mc-config-item mc-config-item-full" }, [
+      $("span", { class: "mc-config-label" }, [
+        "JVM Args",
+        $("span", { class: "mc-config-badge" }, [`${heapTier(runtime)} · ${runtimeLabel}`]),
       ]),
-      $("div", { class: "mc-config-item" }, [
-        $("span", { class: "mc-config-label" }, ["RAM"]),
-        ramSelect,
-      ]),
-      $("div", { class: "mc-config-item mc-config-jvm" }, [
-        $("span", { class: "mc-config-label" }, [
-          "JVM Args",
-          $("span", { class: "mc-config-badge" }, [`${heapTier(runtime)} · ${runtimeLabel}`]),
-        ]),
-        $("code", { class: cls("mc-config-value", "mc-jvm-flags", usingRecommended ? "" : "mc-jvm-custom") }, [currentJvm]),
-      ]),
+      $("code", { class: cls("mc-jvm-flags", usingRecommended ? "" : "mc-jvm-custom") }, [currentJvm]),
     ]),
   ]);
 }
-
 
 function renderJavaSection(): HTMLElement {
   const s = state!;
@@ -612,10 +720,11 @@ function renderJavaSection(): HTMLElement {
   });
 
   const installBtn = $<HTMLButtonElement>("button", {
-    class: cls("mc-btn", "mc-btn-sm", s.downloadingJava ? "mc-btn-disabled" : "mc-btn-primary"),
+    class: cls("mc-btn", "mc-btn-sm", s.downloadingJava ? "mc-btn-disabled" : ""),
     type: "button",
-    disabled: s.downloadingJava ? "true" : undefined,
-  }, [s.downloadingJava ? "downloading…" : `install Java ${s.javaMajor}`]);
+  });
+  installBtn.textContent = s.downloadingJava ? "downloading…" : `install Java ${s.javaMajor}`;
+  if (s.downloadingJava) { installBtn.setAttribute("disabled", "true"); }
 
   installBtn.addEventListener("click", () => {
     if (!state || state.downloadingJava) return;
@@ -654,51 +763,54 @@ function renderJavaSection(): HTMLElement {
     });
   });
 
-  const installPrompt: HTMLElement | null =
+  const javaRow = $("div", { class: "mc-java-row" }, [
+    select,
+    $("button", { class: "mc-btn mc-btn-sm", type: "button" }, ["↻"]).tap((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          const installs = await detectJava(state!.hostAPI.invoke);
+          if (!state) return;
+          state.javaInstalls = installs;
+          state.javaMissing = !installs.some((j) => j.majorVersion >= state.javaMajor);
+          render();
+        } catch { /* ignore */ }
+      });
+    }),
+    $("input", {
+      class: "mc-java-path-input", type: "text",
+      placeholder: "Or type a Java path…", value: s.selectedJava,
+    }).tap((input) => {
+      input.addEventListener("input", () => { if (state) state.selectedJava = input.value; });
+    }),
+  ]);
+
+  const promptEl: HTMLElement | null =
     s.javaMissing && !s.downloadingJava
       ? $("div", { class: "mc-java-missing" }, [
-          $("span", { class: "mc-java-warn" }, [
-            `⚠ No Java ${s.javaMajor}+ found — required for MC ${s.mcVersion || "selected"}. `,
-          ]),
-          installBtn,
-        ])
+        $("span", { class: "mc-java-warn" }, [
+          `⚠ No Java ${s.javaMajor}+ found — required for MC ${s.mcVersion || "selected"}. `,
+        ]),
+        installBtn,
+      ])
       : null;
 
   const downloadingHint: HTMLElement | null =
     s.downloadingJava
       ? $("div", { class: "mc-java-downloading" }, [
-          installBtn,
-          $("span", { class: "mc-java-hint" }, [
-            `Downloading + extracting Java ${s.javaMajor} into jdk/ …`,
-          ]),
-        ])
+        installBtn,
+        $("span", { class: "mc-java-hint" }, [
+          `Downloading + extracting Java ${s.javaMajor} into jdk/ …`,
+        ]),
+      ])
       : null;
 
-  return $("div", { class: "mc-subsection" }, [
-    $("div", { class: "mc-subsection-title" }, [`Java Runtime  —  recommended: Java ${recommended}`]),
-    $("div", { class: "mc-java-row" }, [
-      select,
-      $("button", { class: "mc-btn mc-btn-sm", type: "button" }, ["↻"]).tap((btn) => {
-        btn.addEventListener("click", async () => {
-          try {
-            const installs = await detectJava(state!.hostAPI.invoke);
-            if (!state) return;
-            state.javaInstalls = installs;
-            state.javaMissing = !installs.some((j) => j.majorVersion >= state.javaMajor);
-            render();
-          } catch { /* ignore */ }
-        });
-      }),
-      $("input", { class: "mc-java-path-input", type: "text", placeholder: "Or type a Java path…", value: s.selectedJava }).tap((input) => {
-        input.addEventListener("input", () => { if (state) state.selectedJava = input.value; });
-      }),
-    ]),
-    installPrompt ?? $("span", { style: "display:none" }),
+  return $("div", {}, [
+    javaRow,
+    promptEl ?? $("span", { style: "display:none" }),
     downloadingHint ?? $("span", { style: "display:none" }),
     javaInstallsSummary(s.javaInstalls, s.mcVersion),
   ]);
 }
-
 
 function javaInstallsSummary(installs: JavaInstall[], mcVersion: string): HTMLElement {
   const recommended = mcVersionToJavaVersion(mcVersion);
@@ -711,29 +823,20 @@ function javaInstallsSummary(installs: JavaInstall[], mcVersion: string): HTMLEl
   ]);
 }
 
-function stepDot(status: InstallStep["status"]): string {
-  switch (status) {
-    case "running": return "signal-high";
-    case "done": return "text-zinc-500";
-    case "error": return "fault-vector";
-    default: return "text-zinc-700";
-  }
-}
-
-function renderActionButtons(): HTMLElement {
+function renderInstallSection(): HTMLElement {
   const s = state!;
-  const runtime = (s.serverData.userOverrides ?? {}).runtime || "paper";
+  const overrides = s.serverData.userOverrides ?? {};
+  const runtime = overrides.runtime || "paper";
   const canInstall = !s.fetchingVersions && s.mcVersion !== "" && !s.installing;
 
   const btn = $<HTMLButtonElement>("button", {
-    class: cls("mc-btn", canInstall ? "" : "mc-btn-disabled"),
+    class: cls("mc-btn mc-btn-primary mc-install-btn-stretch", canInstall ? "" : "mc-btn-disabled"),
     type: "button",
-    disabled: canInstall ? undefined : "true",
-  }, [
-    s.installing
-      ? s.installError ? "retry install" : "installing…"
-      : s.installSteps.some((st) => st.status === "done") ? "re-install" : "install",
-  ]);
+  });
+  btn.textContent = s.installing
+    ? s.installError ? "retry install" : "installing…"
+    : s.installSteps.some((st) => st.status === "done") ? "re-install" : "install server";
+  if (!canInstall) { btn.setAttribute("disabled", "true"); }
 
   btn.addEventListener("click", () => {
     if (!state || !canInstall) return;
@@ -763,29 +866,36 @@ function renderActionButtons(): HTMLElement {
   const stepList: HTMLElement | null =
     s.installSteps.length > 0
       ? $("div", { class: "mc-install-steps" },
-          s.installSteps.map((st) => {
-            const message = st.message ? ` — ${st.message}` : "";
-            return $("div", { class: "mc-install-step text-zinc-400" }, [
-              $("span", { class: `mc-install-dot ${stepDot(st.status)}` }, ["•"]),
-              $("span", { class: "mc-install-label" }, [`${st.label}${message}`]),
-            ]);
-          }),
-        )
+        s.installSteps.map((st) => {
+          const message = st.message ? ` — ${st.message}` : "";
+          const dotColor =
+            st.status === "running" ? "signal-high" :
+              st.status === "done" ? "text-zinc-500" :
+                st.status === "error" ? "fault-vector" : "text-zinc-700";
+          return $("div", { class: "mc-install-step" }, [
+            $("span", { class: `mc-install-dot ${dotColor}` }, ["•"]),
+            $("span", { class: "mc-install-label" }, [`${st.label}${message}`]),
+          ]);
+        }),
+      )
       : null;
 
   const logTail: HTMLElement | null =
     s.installLog.length > 0
       ? $("div", { class: "mc-install-log" },
-          s.installLog.slice(-6).map((line) => $("div", { class: "mc-install-log-line" }, [line])),
-        )
+        s.installLog.slice(-6).map((line) => $("div", { class: "mc-install-log-line" }, [line])),
+      )
       : null;
 
-  return $("div", { class: "mc-subsection" }, [
-    $("div", { class: "mc-subsection-title" }, ["Installation"]),
-    $("div", { class: "mc-install-row" }, [btn, s.installing
-      ? $("span", { class: "mc-install-spinner" }, ["◳ working…"])
-      : $("span", { class: "mc-install-hint" }, [
-          s.mcVersion ? `Downloads + configures ${runtime} ${s.mcVersion}` : "Select a Minecraft version to install",
+  return $("div", {}, [
+    $("div", { class: "mc-install-row" }, [
+      btn,
+      s.installing
+        ? $("span", { class: "mc-install-spinner" }, ["◳ working…"])
+        : $("span", { class: "mc-install-hint" }, [
+          s.mcVersion
+            ? `Downloads + configures ${RUNTIME_LABELS[overrides.runtime || "paper"] || overrides.runtime || "paper"} ${s.mcVersion}`
+            : "Select a Minecraft version to install",
         ]),
     ]),
     stepList ?? $("span", { style: "display:none" }),

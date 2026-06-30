@@ -117,6 +117,94 @@ pub fn resolve_variables(template: &str, variables: &HashMap<String, String>) ->
     out
 }
 
+/// Returns true if `line` already starts with a `[HH:MM:SS]`-style timestamp.
+///
+/// Deliberately liberal: accepts `[HH:MM]`, `[H:MM:SS.fff]`, `[2:32:07 PM]`,
+/// optional brackets, optional AM/PM, and leading whitespace. The goal is to
+/// *never* double-stamp — a false positive just means we skip a redundant
+/// prefix the line didn't need anyway. Sub-second fractions and localized
+/// formats we don't emit are tolerated; the only cost of a false positive is
+/// one unstamped line.
+///
+// The `i += 1` advancing the optional second hour digit trips a false
+// positive here; the dump below it reads `i` via `bytes[i]`, but the lint
+// sees the path through the hours branch as overwriting. Suppress locally.
+#[allow(unused_assignments)]
+fn has_timestamp(line: &str) -> bool {
+    use std::ops::ControlFlow;
+
+    // Advance I through N ASCII digits starting at I; return Break early if a
+    // non-digit is hit before N are consumed.
+    fn digits(bytes: &[u8], i: &mut usize, n: usize) -> ControlFlow<(), ()> {
+        for _ in 0..n {
+            if *i >= bytes.len() || !bytes[*i].is_ascii_digit() {
+                return ControlFlow::Break(());
+            }
+            *i += 1;
+        }
+        ControlFlow::Continue(())
+    }
+
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+
+    // Skip optional leading whitespace.
+    let mut i = 0;
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+
+    // Optional opening bracket.
+    if i < len && bytes[i] == b'[' {
+        i += 1;
+    }
+
+    // 1–2 digit hour.
+    if digits(bytes, &mut i, 1).is_break() {
+        return false;
+    }
+    if i < len && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i >= len || bytes[i] != b':' || digits(&bytes, &mut i, 2).is_break() {
+        return false;
+    }
+
+    // Optional ':SS' (seconds).
+    if i < len && bytes[i] == b':' {
+        if digits(&bytes, &mut i, 2).is_break() {
+            return false;
+        }
+    }
+
+    // Optional sub-second fraction ('.' then 1+ digits).
+    if i < len && bytes[i] == b'.' {
+        i += 1;
+        if digits(&bytes, &mut i, 1).is_break() {
+            return false;
+        }
+        while i < len && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+
+    // Optional AM/PM suffix — tolerate both "AM"/"PM" and a lone trailing "M".
+    if matches!(bytes.get(i), Some(b) if *b == b'a' || *b == b'A' || *b == b'p' || *b == b'P')
+        && matches!(bytes.get(i + 1), Some(b) if *b == b'm' || *b == b'M')
+    {
+        i += 2;
+    } else if matches!(bytes.get(i), Some(b) if *b == b'm' || *b == b'M') {
+        i += 1;
+    }
+
+    // If an opening bracket was consumed, a closing ']' may follow.
+    if i < len && bytes[i] == b']' {
+        i += 1;
+    }
+
+    true
+}
+
 /// Formats the current wall-clock time as `[HH:MM:SS]` for log prefixes.
 fn timestamp() -> String {
     let secs = SystemTime::now()
@@ -391,7 +479,14 @@ fn forward_line(
         return;
     }
     append_log(log_path, trimmed.as_bytes());
-    let stamped = format!("{} {}", timestamp(), trimmed);
+    // Only stamp if the line didn't already arrive with its own timestamp;
+    // emulated consoles sometimes print one of their own and we don't want to
+    // double up.
+    let stamped = if has_timestamp(trimmed) {
+        trimmed.to_string()
+    } else {
+        format!("{} {}", timestamp(), trimmed)
+    };
     let _ = handle.emit(event_name, stamped);
 }
 

@@ -39,6 +39,17 @@ function timestamp(): string {
   return `[${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}]`;
 }
 
+// Mirrors the Rust side's check so we never double-stamp a line that arrived
+// with a timestamp already attached (e.g. an emulated console that prints its
+// own). Liberal on purpose — false positives just mean we skip a redundant
+// prefix that wasn't going to be needed.
+const HAS_TIMESTAMP_RE =
+  /^\s*\[?\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(?:[AP]M?)?\]?\s*/i;
+
+function hasTimestamp(line: string): boolean {
+  return HAS_TIMESTAMP_RE.test(line);
+}
+
 interface UseServerControlResult {
   logs: string[];
   running: boolean;
@@ -250,10 +261,13 @@ export function useServerControl(
   // streaming event — used to echo user-typed commands back into the terminal.
   // Prefixed with a timestamp so local-echo lines match streamed ones.
   const pushLine = useCallback((line: string) => {
+    // Only stamp if the line doesn't already carry a timestamp — stdout that
+    // emulates a console often prefixes its own `[HH:MM:SS]`.
+    const stamped = hasTimestamp(line) ? line : `${timestamp()} ${line}`;
     setLogs((prev) =>
       prev.length >= MAX_LINES
-        ? [...prev.slice(1), `${timestamp()} ${line}`]
-        : [...prev, `${timestamp()} ${line}`],
+        ? [...prev.slice(1), stamped]
+        : [...prev, stamped],
     );
   }, []);
 

@@ -43,6 +43,12 @@ export interface LifecycleStep {
 /** Map of lifecycle step name → step (install / start / stop ...). */
 export type LifecycleMap = Record<string, LifecycleStep>;
 
+/** A static tab declaration in the manifest. */
+export interface PluginTabDescriptor {
+  id: string;
+  label: string;
+}
+
 /** A plugin manifest.json document. */
 export interface Manifest {
   id: string;
@@ -57,4 +63,10 @@ export interface Manifest {
   lifecycle: LifecycleMap;
   /** Starter files written into a fresh instance directory, keyed by label. */
   scaffold: Record<string, ScaffoldFile>;
+  /**
+   * Optional static tab declarations.
+   * These describe tabs the plugin may register dynamically at runtime.
+   * The actual mount functions are provided via the JS bundle.
+   */
+  tabs?: PluginTabDescriptor[];
 }

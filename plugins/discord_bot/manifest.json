@@ -65,6 +65,12 @@
       ]
     }
   },
+  "tabs": [
+    {
+      "id": "dbot-status",
+      "label": "Status"
+    }
+  ],
   "scaffold": {
     "package_json": {
       "path": "package.json",

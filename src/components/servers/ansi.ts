@@ -101,3 +101,65 @@ function applySgr(code: number, state: StyleState) {
 
 /** Default foreground for a segment with no explicit color. */
 export const DEFAULT_FG = RESET;
+
+/**
+ * Dim zinc used solely for timestamp prefixes (`[HH:MM:SS]`). Kept distinct so
+ * the body of a line reads at full contrast while the time recedes visually.
+ */
+export const TS_COLOR = "#6b7280";
+
+/**
+ * Matches a leading wall-clock timestamp, liberal on purpose so we never double-
+ * stamp a line that already carries one.
+ *
+ * Accepts: `[HH:MM:SS]`, `[H:MM:SS]`, `[14:32:07]`, `[2:32:07 PM]`,
+ * `14:32:07`, and sub-second variants `[14:32:07.123]`. Case-insensitive.
+ */
+const TIMESTAMP_RE = /^\s*\[?\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\s*(?:[AP]M?)?\]?\s*/i;
+
+/**
+ * Splits a log line into its leading timestamp prefix (if any) and the rest of
+ * the line. When no leading timestamp is found, `prefix` is empty and `rest`
+ * is the original line untouched — callers can use either field.
+ */
+export function parseTimestamp(line: string): {
+  prefix: string;
+  rest: string;
+} {
+  const match = TIMESTAMP_RE.exec(line);
+  if (!match) return { prefix: "", rest: line };
+  return { prefix: match[0], rest: line.slice(match[0].length) };
+}
+
+/**
+ * Inspects the start of `line` to guess its log level, then returns a tint
+ * color for the whole line. ANSI codes inside the line still override this
+ * per-segment, so the level tint is just a base layer, never destructive.
+ *
+ * Keywords are matched case-insensitively. "error" wins over "warn" — if a line
+ * says both, the louder level paints it.
+ */
+const LEVEL_RULES: Array<{
+  level: string;
+  color: string;
+  keywords: string[];
+}> = [
+  { level: "error", color: "#f54c4c", keywords: ["error", "exception", "fatal", "failed", "panic", "severe"] },
+  { level: "warn", color: "#f5a04c", keywords: ["warn", "caution", "deprecated"] },
+  { level: "success", color: "#4cf5a0", keywords: ["done", "started", "ready", "listening", "loaded", "joined"] },
+];
+
+const TINT_NONE = "inherit";
+
+export function classifyLevelColor(line: string): string {
+  // Search the body (past any leading timestamp) so phrases prefixed by a
+  // timestamp don't skew detection.
+  const body = parseTimestamp(line).rest;
+  const haystack = body.toLowerCase();
+  for (const rule of LEVEL_RULES) {
+    for (const kw of rule.keywords) {
+      if (haystack.includes(kw)) return rule.color;
+    }
+  }
+  return TINT_NONE;
+}

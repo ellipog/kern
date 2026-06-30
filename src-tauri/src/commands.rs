@@ -524,10 +524,81 @@ fn timestamp() -> String {
     format!("[{h:02}:{m:02}:{s:02}]")
 }
 
+/// Returns true if `line` already starts with a `[HH:MM:SS]`-style timestamp.
+///
+/// Mirrors process::has_timestamp — keeps the in-memory view in step with what
+/// lands on disk so emulated console timestamps never double up.
+//
+// See process.rs — the optional second hour digit triggers a false positive
+// `unused_assignments` warning; suppressed at function level since `i` is
+// read by the subsequent `'':'` check in every branch that reaches here.
+#[allow(unused_assignments)]
+fn has_timestamp(line: &str) -> bool {
+    use std::ops::ControlFlow;
+
+    fn digits(bytes: &[u8], i: &mut usize, n: usize) -> ControlFlow<(), ()> {
+        for _ in 0..n {
+            if *i >= bytes.len() || !bytes[*i].is_ascii_digit() {
+                return ControlFlow::Break(());
+            }
+            *i += 1;
+        }
+        ControlFlow::Continue(())
+    }
+
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i < len && bytes[i] == b'[' {
+        i += 1;
+    }
+    if digits(bytes, &mut i, 1).is_break() {
+        return false;
+    }
+    if i < len && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i >= len || bytes[i] != b':' || digits(&bytes, &mut i, 2).is_break() {
+        return false;
+    }
+    if i < len && bytes[i] == b':' {
+        if digits(&bytes, &mut i, 2).is_break() {
+            return false;
+        }
+    }
+    if i < len && bytes[i] == b'.' {
+        i += 1;
+        if digits(&bytes, &mut i, 1).is_break() {
+            return false;
+        }
+        while i < len && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    if matches!(bytes.get(i), Some(b) if *b == b'a' || *b == b'A' || *b == b'p' || *b == b'P')
+        && matches!(bytes.get(i + 1), Some(b) if *b == b'm' || *b == b'M')
+    {
+        i += 2;
+    } else if matches!(bytes.get(i), Some(b) if *b == b'm' || *b == b'M') {
+        i += 1;
+    }
+    if i < len && bytes[i] == b']' {
+        i += 1;
+    }
+    true
+}
+
 /// Appends a line to latest.log and returns a timestamped string for the event.
 fn forward_to_log(_handle: &AppHandle, _event_name: &str, log_path: &std::path::Path, line: &str) -> String {
-    let ts = timestamp();
-    let stamped = format!("{ts} {line}");
+    let stamped = if has_timestamp(line) {
+        line.to_string()
+    } else {
+        let ts = timestamp();
+        format!("{ts} {line}")
+    };
     // Write to latest.log (best-effort).
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
         let _ = writeln!(file, "{stamped}");

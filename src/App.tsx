@@ -19,7 +19,8 @@ import { PluginManager } from "./components/plugins/PluginManager";
 import { useServers } from "./hooks/useServers";
 import { useLiveStatus } from "./hooks/useLiveStatus";
 import { UiStateProvider, useUiState } from "./hooks/useUiState";
-import type { NewServerInput, ServerInstance } from "./types/server";
+import { SidebarItemRegistryProvider } from "./hooks/useSidebarItems";
+import type { NewServerInput, ServerInstance, SortPref } from "./types/server";
 
 type View =
   | { kind: "list" }
@@ -27,6 +28,48 @@ type View =
   | { kind: "create" }
   | { kind: "edit"; server: ServerInstance }
   | { kind: "plugins" };
+
+/* ─── Instance sorting ─────────────────────────────────────────────────── */
+
+/**
+ * Fixed sort order for the status lifecycle axis, active states first.
+ * Used for the "status" sort key so the order is semantically meaningful
+ * (running → starting → stopping → installing → stopped → error) rather
+ * than purely alphabetical.
+ */
+const STATUS_RANK: Record<ServerInstance["status"], number> = {
+  running: 0,
+  starting: 1,
+  stopping: 2,
+  installing: 3,
+  stopped: 4,
+  error: 5,
+};
+
+/** Sort a copy of the server array in place according to the given preference. */
+function sortInstances(servers: ServerInstance[], pref: SortPref): ServerInstance[] {
+  const dir = pref.direction === "desc" ? -1 : 1;
+  return [...servers].sort((a, b) => {
+    let cmp: number;
+    switch (pref.key) {
+      case "name":
+        cmp = a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+        break;
+      case "serverType":
+        cmp = a.serverType.localeCompare(b.serverType, undefined, {
+          sensitivity: "base",
+        });
+        break;
+      case "path":
+        cmp = a.path.localeCompare(b.path, undefined, { sensitivity: "base" });
+        break;
+      case "status":
+        cmp = STATUS_RANK[a.status] - STATUS_RANK[b.status];
+        break;
+    }
+    return cmp * dir;
+  });
+}
 
 /* ─── Bridge context for lifting selectedServerId up to the provider ───── */
 
@@ -53,7 +96,9 @@ export default function App() {
   return (
     <UiStateProvider selectedServerId={selectedId}>
       <SelectedIdBridgeContext.Provider value={onChangeRef}>
-        <AppInner />
+        <SidebarItemRegistryProvider>
+          <AppInner />
+        </SidebarItemRegistryProvider>
       </SelectedIdBridgeContext.Provider>
     </UiStateProvider>
   );
@@ -74,7 +119,7 @@ function AppInner() {
     refreshOrphaned,
     reload,
   } = useServers();
-  const { uiState, setView } = useUiState();
+  const { uiState, setView, setSortPreference } = useUiState();
   const bridgeRef = useContext(SelectedIdBridgeContext);
 
   // Overlay live process status onto the persisted list. The sidebar + main
@@ -133,9 +178,17 @@ function AppInner() {
     [setView],
   );
 
+  // Apply the user's sort preference. Doing this here, before the array splits
+  // to the sidebar (via AppShell) and the main grid (via ServerList), means a
+  // single sort preference controls instance order everywhere — no sync needed.
+  const serversSorted = useMemo(
+    () => (serversLive.length === 0 ? serversLive : sortInstances(serversLive, uiState.sortPreference)),
+    [serversLive, uiState.sortPreference],
+  );
+
   const selected = useMemo(
-    () => serversLive.find((s) => s.id === selectedId) ?? null,
-    [serversLive, selectedId],
+    () => serversSorted.find((s) => s.id === selectedId) ?? null,
+    [serversSorted, selectedId],
   );
 
   // Confirmation dialog state — tracks the instance id pending deletion.
@@ -235,7 +288,7 @@ function AppInner() {
 
   return (
     <AppShell
-      servers={serversLive}
+      servers={serversSorted}
       selectedId={selectedId}
       loading={loading}
       onSelect={handleSelect}
@@ -252,7 +305,7 @@ function AppInner() {
              is now overflow-hidden flex flex-col) — no scroll wrapper, so
              the terminal owns all vertical scrolling. */
           <ServerDetailView
-            key="detail"
+            key={selected.id}
             server={selected}
             onBack={() => navigate("list")}
             onStatusChange={handleStatusChange}
@@ -270,11 +323,13 @@ function AppInner() {
             {view.kind === "list" && (
               <ServerList
                 key="list"
-                servers={serversLive}
+                servers={serversSorted}
                 onDelete={handleDelete}
                 onEdit={handleEdit}
                 onAdd={() => navigate("create")}
                 onSelect={handleSelect}
+                sortPreference={uiState.sortPreference}
+                onSortChange={setSortPreference}
               />
             )}
 

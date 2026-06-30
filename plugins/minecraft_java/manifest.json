@@ -127,6 +127,16 @@
       ]
     }
   },
+  "tabs": [
+    {
+      "id": "mc-setup",
+      "label": "Setup"
+    },
+    {
+      "id": "mc-chat",
+      "label": "Chat"
+    }
+  ],
   "scaffold": {
     "eula": {
       "path": "eula.txt",

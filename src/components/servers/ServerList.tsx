@@ -1,4 +1,4 @@
-import type { ServerInstance } from "../../types/server";
+import type { ServerInstance, SortPref } from "../../types/server";
 import { ServerCard } from "./ServerCard";
 import { MatrixViewport } from "../matrix/MatrixViewport";
 import { polarRadarShader } from "../matrix/shaders/polarRadar";
@@ -12,6 +12,12 @@ interface ServerListProps {
   /** Navigate to the detail view for a server. */
   onSelect?: (id: string) => void;
   onAdd: () => void;
+  /** The current sort preference. When provided alongside onSortChange, the
+   * selector UI is rendered in the header. Both optional so older callers of
+   * this component keep working without changes. */
+  sortPreference?: SortPref;
+  /** Change the sort preference. Reports back to the parent, which owns state. */
+  onSortChange?: (pref: SortPref) => void;
 }
 
 /** Color swatches for the status-axis legend, mirroring status.ts. */
@@ -33,7 +39,15 @@ const DOT_HEX: Record<DotColor, string> = {
  * Overview of the registry. The empty state frames the radar viewport so the
  * host is never visually idle — the sweep pulses even with no instances.
  */
-export function ServerList({ servers, onDelete, onEdit, onAdd, onSelect }: ServerListProps) {
+export function ServerList({
+  servers,
+  onDelete,
+  onEdit,
+  onAdd,
+  onSelect,
+  sortPreference,
+  onSortChange,
+}: ServerListProps) {
   // Live host telemetry drives the empty-state radar so the dashboard pulses
   // with real machine load. Hook runs unconditionally (React rules) even though
   // the radar only renders in the empty state below.
@@ -64,6 +78,27 @@ export function ServerList({ servers, onDelete, onEdit, onAdd, onSelect }: Serve
     );
   }
 
+  // Sort selector is only rendered when the parent owns sort state — older
+  // callers that don't pass these props keep their current header unchanged.
+  const showSortControls = Boolean(sortPreference) && Boolean(onSortChange);
+
+  function setSortKey(key: SortPref["key"]) {
+    if (!sortPreference || !onSortChange) return;
+    // Changing the field resets to ascending for a predictable start state.
+    onSortChange({ key, direction: "asc" });
+  }
+
+  function toggleDirection() {
+    if (!sortPreference || !onSortChange) return;
+    onSortChange({
+      key: sortPreference.key,
+      direction: sortPreference.direction === "asc" ? "desc" : "asc",
+    });
+  }
+
+  const sortSelectClass =
+    "bg-bg-core border border-grid-bounds px-2 py-1.5 text-xs text-zinc-200 focus:border-signal-low transition-colors";
+
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-3">
@@ -72,6 +107,38 @@ export function ServerList({ servers, onDelete, onEdit, onAdd, onSelect }: Serve
           <span className="text-zinc-600 tabular-nums">({servers.length})</span>
         </h2>
         <ul className="flex items-center gap-3">
+          {showSortControls && (
+            <li className="flex items-center gap-1.5 mr-1" title="sort instances">
+              <span className="text-[10px] text-zinc-600 uppercase tracking-wider">
+                sort
+              </span>
+              <select
+                value={sortPreference!.key}
+                onChange={(e) => setSortKey(e.target.value as SortPref["key"])}
+                className={sortSelectClass}
+              >
+                <option value="name">name</option>
+                <option value="serverType">type</option>
+                <option value="status">status</option>
+                <option value="path">path</option>
+              </select>
+              <button
+                type="button"
+                onClick={toggleDirection}
+                title={
+                  sortPreference!.direction === "asc"
+                    ? "ascending (click to reverse)"
+                    : "descending (click to reverse)"
+                }
+                aria-label={`sort direction: ${
+                  sortPreference!.direction === "asc" ? "ascending" : "descending"
+                }`}
+                className="px-1.5 py-1.5 text-xs border border-grid-bounds text-zinc-300 hover:border-signal-low hover:bg-bg-core transition-colors"
+              >
+                {sortPreference!.direction === "asc" ? "↑" : "↓"}
+              </button>
+            </li>
+          )}
           {LEGEND.map((entry) => (
             <li key={entry.color} className="flex items-center gap-1">
               <span

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ServerInstance } from "../../types/server";
 import { useServerControl } from "../../hooks/useServerControl";
 import { usePlugins } from "../../hooks/usePlugins";
@@ -7,13 +8,33 @@ import { useMetrics } from "../../hooks/useMetrics";
 import { useLogActivity } from "../../hooks/useLogActivity";
 import { useUiState } from "../../hooks/useUiState";
 import { statusHex } from "./status";
-import { parseAnsi, DEFAULT_FG } from "./ansi";
-import { PluginWrapper } from "../plugins/PluginWrapper";
+import {
+  parseAnsi,
+  DEFAULT_FG,
+  TS_COLOR,
+  classifyLevelColor,
+  parseTimestamp,
+} from "./ansi";
+import { PluginBoot, preloadPluginAssets } from "../plugins/PluginBoot";
+import { PluginTabContent } from "../plugins/PluginTabContent";
 import { MatrixBar } from "../matrix/MatrixBar";
 import { reactorChannelShader } from "../matrix/shaders/reactorChannel";
 import { FileEditorPanel } from "./FileEditorPanel";
+import {
+  PluginTabRegistryProvider,
+  usePluginTabs,
+} from "../../hooks/usePluginTabs";
+import {
+  ToolbarActionRegistryProvider,
+  useToolbarActions,
+} from "../../hooks/useToolbarActions";
+import type { PluginTab, HostAPI } from "../../types/plugin";
 
-type DetailTab = "logs" | "files";
+/** Built-in tab definitions. The id "logs" is kept for persisted-state compat. */
+const BUILT_IN_TABS = [
+  { id: "logs", label: "terminal" },
+  { id: "files", label: "files" },
+] as const;
 
 interface ServerDetailViewProps {
   server: ServerInstance;
@@ -59,27 +80,17 @@ export function ServerDetailView({
   // Read the saved state for this server (falls back to defaults when none).
   const serverUi = uiState.servers[server.id] ?? {
     activeTab: "logs" as const,
-    pluginExpanded: true,
     commandHistory: [],
     editor: { openFiles: [], activeFile: null, expandedPaths: [], cursorLine: 1, cursorCol: 1 },
   };
 
-  const [activeTab, setActiveTabState] = useState<DetailTab>(serverUi.activeTab);
-  const [pluginExpanded, setPluginExpandedState] = useState(serverUi.pluginExpanded);
+  const [activeTab, setActiveTabState] = useState<string>("logs");
 
-  // Wrap the setters to also persist the change.
+  // Wrap the setter to also persist the change.
   const setActiveTab = useCallback(
-    (tab: DetailTab) => {
+    (tab: string) => {
       setActiveTabState(tab);
       updateServer(server.id, { activeTab: tab });
-    },
-    [server.id, updateServer],
-  );
-
-  const setPluginExpanded = useCallback(
-    (expanded: boolean) => {
-      setPluginExpandedState(expanded);
-      updateServer(server.id, { pluginExpanded: expanded });
     },
     [server.id, updateServer],
   );
@@ -113,6 +124,13 @@ export function ServerDetailView({
     () => pluginManifest?.lifecycle?.install != null,
     [pluginManifest],
   );
+
+  // Kick off background preloading of plugin assets as soon as we know the
+  // plugin type. This starts the IPC call, CSS fetch, and JS module import
+  // before PluginBoot mounts, so its boot sequence is near-instant.
+  useEffect(() => {
+    if (pluginManifest) preloadPluginAssets(server.serverType);
+  }, [pluginManifest, server.serverType]);
 
   // Track whether the install lifecycle step has been run at least once.
   // Persisted via a .installed marker file in the instance directory.
@@ -317,179 +335,245 @@ export function ServerDetailView({
   const isEffectivelyRunning = !server.isOrphaned && (running || server.status === "running");
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Header / metadata */}
-      <div className="border-b border-grid-bounds p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2 min-w-0">
-            <button
-              onClick={onBack}
-              className="text-[18px] text-zinc-500 hover:text-zinc-200 transition-colors mr-1"
-            >
-              ←
-            </button>
-            <div className="min-w-0">
-              <h2 className="text-sm text-zinc-100 truncate">{server.name}</h2>
-              <p className="text-[11px] text-zinc-500 font-mono truncate">
-                {server.id} · {server.serverType}
-              </p>
+    <PluginTabRegistryProvider>
+      <ToolbarActionRegistryProvider>
+      <div className="flex flex-col h-full">
+        {/* Header / metadata */}
+        <div className="border-b border-grid-bounds p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <button
+                onClick={onBack}
+                className="text-[18px] text-zinc-500 hover:text-zinc-200 transition-colors mr-1"
+              >
+                ←
+              </button>
+              <div className="min-w-0">
+                <h2 className="text-sm text-zinc-100 truncate">{server.name}</h2>
+                <p className="text-[11px] text-zinc-500 font-mono truncate">
+                  {server.id} · {server.serverType}
+                </p>
+              </div>
             </div>
+
+            {/* Reactor channel — a fluid-width matrix strip filling the space
+                between the instance name and the lifecycle buttons. Layers CPU
+                shimmer, RAM fill, and log-activity comet pulses into one bar. */}
+            <div className="flex-1 min-w-0 flex flex-col gap-1 px-2">
+              <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-wider text-zinc-600 tabular-nums">
+                <span className="flex items-center gap-3">
+                  <span>
+                    cpu{" "}
+                    <span className={metrics.cpu > 0.9 ? "text-fault-vector" : "text-zinc-400"}>
+                      {(metrics.cpu * 100).toFixed(0)}%
+                    </span>
+                  </span>
+                  <span>
+                    ram{" "}
+                    <span className={metrics.ram > 0.85 ? "text-fault-vector" : "text-zinc-400"}>
+                      {(metrics.ram * 100).toFixed(0)}%
+                    </span>
+                  </span>
+                  <span>
+                    log{" "}
+                    <span className={activity > 1 ? "text-signal-high" : "text-zinc-400"}>
+                      {activity.toFixed(1)}×
+                    </span>
+                  </span>
+                </span>
+                <span className="opacity-60">reactor</span>
+              </div>
+              <MatrixBar
+                shader={reactorChannelShader}
+                telemetry={{ ...metrics, status: liveStatus, activity }}
+                rows={2}
+                pitchPx={6}
+              />
+            </div>
+
+          <HeaderToolbar
+            liveHex={liveHex}
+            liveStatus={liveStatus}
+            isEffectivelyRunning={isEffectivelyRunning}
+            transitioning={transitioning}
+            hasInstallStep={hasInstallStep}
+            installed={installed}
+            busy={busy}
+            launching={launching}
+            server={server}
+            restart={restart}
+            stop={stop}
+            install={install}
+            handleInstalled={handleInstalled}
+            launch={launch}
+          />
           </div>
 
-          {/* Reactor channel — a fluid-width matrix strip filling the space
-              between the instance name and the lifecycle buttons. Layers CPU
-              shimmer, RAM fill, and log-activity comet pulses into one bar. */}
-          <div className="flex-1 min-w-0 flex flex-col gap-1 px-2">
-            <div className="flex items-center justify-between font-mono text-[9px] uppercase tracking-wider text-zinc-600 tabular-nums">
-              <span className="flex items-center gap-3">
-                <span>
-                  cpu{" "}
-                  <span className={metrics.cpu > 0.9 ? "text-fault-vector" : "text-zinc-400"}>
-                    {(metrics.cpu * 100).toFixed(0)}%
-                  </span>
-                </span>
-                <span>
-                  ram{" "}
-                  <span className={metrics.ram > 0.85 ? "text-fault-vector" : "text-zinc-400"}>
-                    {(metrics.ram * 100).toFixed(0)}%
-                  </span>
-                </span>
-                <span>
-                  log{" "}
-                  <span className={activity > 1 ? "text-signal-high" : "text-zinc-400"}>
-                    {activity.toFixed(1)}×
-                  </span>
-                </span>
-              </span>
-              <span className="opacity-60">reactor</span>
-            </div>
-            <MatrixBar
-              shader={reactorChannelShader}
-              telemetry={{ ...metrics, status: liveStatus, activity }}
-              rows={2}
-              pitchPx={6}
-            />
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <span
-              className="text-[11px] font-mono px-3 py-1.5 border"
-              style={{ color: liveHex, borderColor: `${liveHex}55` }}
-            >
-              {liveStatus}
-            </span>
-
-            {isEffectivelyRunning ? (
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[11px]">
+            <dt className="text-zinc-600 uppercase tracking-wider">path</dt>
+            <dd className="text-zinc-400 font-mono truncate flex items-center gap-2" title={server.path}>
+              <span className="truncate">{server.path}</span>
+              <button
+                onClick={() => void invoke("open_folder", { path: server.path })}
+                className="shrink-0 text-[10px] text-zinc-500 hover:text-zinc-200 border border-grid-bounds hover:border-signal-low px-1.5 py-0.5 transition-colors"
+                title="Open folder in file manager"
+              >
+                [open]
+              </button>
+            </dd>
+            {Object.keys(server.userOverrides).length > 0 && (
               <>
-                <button
-                  onClick={restart}
-                  disabled={transitioning}
-                  className="px-3 py-1.5 text-xs text-zinc-200 border border-signal-low hover:border-signal-high hover:text-signal-high font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  restart
-                </button>
-                <button
-                  onClick={stop}
-                  disabled={transitioning}
-                  className="px-3 py-1.5 text-xs text-bg-core bg-fault-vector hover:opacity-80 font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  stop
-                </button>
-              </>
-            ) : (
-              <>
-                {hasInstallStep && (
-                  <button
-                    onClick={async () => {
-                      await install();
-                      await handleInstalled();
-                    }}
-                    disabled={transitioning || server.isOrphaned}
-                    className="px-3 py-1.5 text-xs text-zinc-200 border border-signal-low hover:border-signal-high hover:text-signal-high font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {busy ? "installing…" : installed ? "re-install" : "install"}
-                  </button>
-                )}
-                <button
-                  onClick={launch}
-                  disabled={transitioning || server.isOrphaned}
-                  className="px-3 py-1.5 text-xs text-bg-core bg-signal-high hover:opacity-80 font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
-                >
-                  {launching ? "starting…" : "start"}
-                </button>
+                <dt className="text-zinc-600 uppercase tracking-wider">overrides</dt>
+                <dd className="text-zinc-400 font-mono truncate">
+                  {Object.entries(server.userOverrides)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(" ")}
+                </dd>
               </>
             )}
-          </div>
+          </dl>
         </div>
 
-        <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-[11px]">
-          <dt className="text-zinc-600 uppercase tracking-wider">path</dt>
-          <dd className="text-zinc-400 font-mono truncate flex items-center gap-2" title={server.path}>
-            <span className="truncate">{server.path}</span>
-            <button
-              onClick={() => void invoke("open_folder", { path: server.path })}
-              className="shrink-0 text-[10px] text-zinc-500 hover:text-zinc-200 border border-grid-bounds hover:border-signal-low px-1.5 py-0.5 transition-colors"
-              title="Open folder in file manager"
-            >
-              [open]
-            </button>
-          </dd>
-          {Object.keys(server.userOverrides).length > 0 && (
-            <>
-              <dt className="text-zinc-600 uppercase tracking-wider">overrides</dt>
-              <dd className="text-zinc-400 font-mono truncate">
-                {Object.entries(server.userOverrides)
-                  .map(([k, v]) => `${k}=${v}`)
-                  .join(" ")}
-              </dd>
-            </>
-          )}
-        </dl>
-      </div>
+        {error && (
+          <p className="m-4 text-[11px] text-fault-vector border border-fault-vector/40 bg-fault-vector/5 px-2 py-1">
+            {error}
+          </p>
+        )}
 
-      {error && (
-        <p className="m-4 text-[11px] text-fault-vector border border-fault-vector/40 bg-fault-vector/5 px-2 py-1">
-          {error}
-        </p>
-      )}
+        {server.isOrphaned && (
+          <p className="m-4 text-[11px] text-fault-vector border border-fault-vector/40 bg-fault-vector/5 px-2 py-1">
+            [orphaned] path inaccessible — instance marked orphaned. Cannot launch
+            until the folder is restored.
+          </p>
+        )}
 
-      {server.isOrphaned && (
-        <p className="m-4 text-[11px] text-fault-vector border border-fault-vector/40 bg-fault-vector/5 px-2 py-1">
-          [orphaned] path inaccessible — instance marked orphaned. Cannot launch
-          until the folder is restored.
-        </p>
-      )}
-
-      {/* Collapsible plugin panel — always visible below the header */}
+      {/* Plugin boot loader — invisible, mounts the plugin so it can register
+          tabs, toolbar actions, sidebar items, etc. through the HostAPI. */}
       {pluginManifest && (
-        <div className={`border-b shrink-0 transition-colors border-grid-bounds`}>
-          <div className="px-4 pb-3 pt-3 border-grid-bounds/50">
-            <PluginWrapper
-              pluginId={server.serverType}
-              serverData={server}
-              collapsed={!pluginExpanded}
-              onToggleCollapsed={() => setPluginExpanded(!pluginExpanded)}
-            />
-          </div>
-        </div>
+        <PluginBoot
+          pluginId={server.serverType}
+          serverData={server}
+        />
       )}
 
-      {/* Tab bar — switch between Logs and Files */}
-      <div className="flex items-stretch border-b border-grid-bounds bg-bg-surface shrink-0">
-        <TabButton
-          label="logs"
-          active={activeTab === "logs"}
-          count={logs.length}
-          onClick={() => setActiveTab("logs")}
-        />
-        <TabButton
-          label="files"
-          active={activeTab === "files"}
-          onClick={() => setActiveTab("files")}
+      {/* Tab bar + content — uses PluginTabRegistry context for plugin tabs */}
+      <TabSection
+          server={server}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          logs={logs}
+          terminalRef={terminalRef}
+          handleScroll={handleScroll}
+          showScrollButton={showScrollButton}
+          scrollToBottom={scrollToBottom}
+          input={input}
+          setInput={setInput}
+          inputRef={inputRef}
+          handleKeyDown={handleKeyDown}
+          handleSubmit={handleSubmit}
         />
       </div>
+      </ToolbarActionRegistryProvider>
+    </PluginTabRegistryProvider>
+  );
+}
 
-      {/* Conditional content based on active tab */}
+/* ─── Tab Section (reads plugin tabs from context) ────────────────────── */
+
+interface TabSectionProps {
+  server: ServerInstance;
+  activeTab: string;
+  setActiveTab: (tab: string) => void;
+  logs: string[];
+  terminalRef: React.RefObject<HTMLDivElement | null>;
+  handleScroll: () => void;
+  showScrollButton: boolean;
+  scrollToBottom: () => void;
+  input: string;
+  setInput: (val: string) => void;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  handleKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+  handleSubmit: (e?: React.FormEvent) => Promise<void>;
+}
+
+/**
+ * Tab bar + content area. Uses usePluginTabs() to read plugin-registered tabs
+ * so they appear alongside the built-in "terminal" (logs) and "files" tabs.
+ */
+function TabSection({
+  server,
+  activeTab,
+  setActiveTab,
+  logs,
+  terminalRef,
+  handleScroll,
+  showScrollButton,
+  scrollToBottom,
+  input,
+  setInput,
+  inputRef,
+  handleKeyDown,
+  handleSubmit,
+}: TabSectionProps) {
+  const { tabs: pluginTabs, getTab } = usePluginTabs();
+
+  // Build a combined tab list: built-in first, then plugin tabs.
+  const allTabs = useMemo(() => {
+    const builtIn = BUILT_IN_TABS.map((t) => ({
+      id: t.id,
+      label: t.label,
+      isPlugin: false,
+    }));
+    const plugin = pluginTabs.map((t) => ({
+      id: t.id,
+      label: t.label,
+      isPlugin: true,
+    }));
+    return [...builtIn, ...plugin];
+  }, [pluginTabs]);
+
+  // Generate a fresh hostAPI for plugin tab content.
+  const hostAPI = useMemo<HostAPI>(
+    () => ({
+      invoke: (cmd, args) => invoke(cmd, args),
+      serverPath: server.path,
+      listen: (event, handler) =>
+        listen(event, (e) => handler(e.payload)),
+      // register/unregister methods are no-ops inside tab content
+      // (extensions should be registered from the plugin's main mount, not
+      // from within a tab's own mount, to prevent circular registration).
+      registerTab: () => {},
+      unregisterTab: () => {},
+      registerToolbarAction: () => {},
+      unregisterToolbarAction: () => {},
+      registerSidebarItem: () => {},
+      unregisterSidebarItem: () => {},
+    }),
+    [server.path],
+  );
+
+  // The active plugin tab descriptor, if the active tab is a plugin tab.
+  const activePluginTab = useMemo<PluginTab | undefined>(
+    () => (getTab(activeTab) ?? undefined),
+    [activeTab, getTab],
+  );
+
+  return (
+    <>
+      {/* Tab bar */}
+      <div className="flex items-stretch border-b border-grid-bounds bg-bg-surface shrink-0">
+        {allTabs.map((tab) => (
+          <TabButton
+            key={tab.id}
+            label={tab.label}
+            active={activeTab === tab.id}
+            count={tab.id === "logs" ? logs.length : undefined}
+            onClick={() => setActiveTab(tab.id)}
+          />
+        ))}
+      </div>
+
+      {/* Tab content */}
       {activeTab === "logs" && (
         <>
           {/* Log terminal */}
@@ -502,7 +586,7 @@ export function ServerDetailView({
             </span>
           </div>
           <div
-            ref={terminalRef}
+            ref={terminalRef as React.RefObject<HTMLDivElement>}
             onScroll={handleScroll}
             className="relative flex-1 min-h-0 overflow-y-auto bg-bg-core p-3 font-mono text-[11px] leading-relaxed"
           >
@@ -522,13 +606,22 @@ export function ServerDetailView({
               </p>
             ) : (
               logs.map((line, i) => {
-                const segments = parseAnsi(line);
+                // Split out a leading timestamp (if any) so it renders dimmed.
+                const { prefix, rest } = parseTimestamp(line);
+                const segments = parseAnsi(rest);
+                const tint = classifyLevelColor(line);
                 return (
                   <div
                     key={i}
                     className="whitespace-pre-wrap break-all"
-                    style={{ color: DEFAULT_FG }}
+                    style={{ color: tint === "inherit" ? DEFAULT_FG : tint }}
                   >
+                    {/* Timestamp prefix: dimmed, distinct color, rendered first. */}
+                    {prefix ? (
+                      <span style={{ color: TS_COLOR, opacity: 0.6 }}>
+                        {prefix}
+                      </span>
+                    ) : null}
                     {segments.map((seg, j) => (
                       <span
                         key={j}
@@ -570,6 +663,109 @@ export function ServerDetailView({
         <FileEditorPanel serverId={server.id} />
       )}
 
+      {activePluginTab && activeTab !== "logs" && activeTab !== "files" && (
+        <PluginTabContent
+          tab={activePluginTab}
+          serverData={server}
+          hostAPI={hostAPI}
+        />
+      )}
+    </>
+  );
+}
+
+/* ─── HeaderToolbar — lifecycle buttons + plugin toolbar actions ──────── */
+
+interface HeaderToolbarProps {
+  liveHex: string;
+  liveStatus: string;
+  isEffectivelyRunning: boolean;
+  transitioning: boolean;
+  hasInstallStep: boolean;
+  installed: boolean;
+  busy: boolean;
+  launching: boolean;
+  server: ServerInstance;
+  restart: () => Promise<void>;
+  stop: () => Promise<void>;
+  install: () => Promise<void>;
+  handleInstalled: () => Promise<void>;
+  launch: () => Promise<void>;
+}
+
+/**
+ * Header toolbar area — renders the live status badge, lifecycle buttons
+ * (start/stop/restart/install), and any plugin-registered toolbar actions.
+ */
+function HeaderToolbar({
+  liveHex, liveStatus, isEffectivelyRunning, transitioning,
+  hasInstallStep, installed, busy, launching,
+  server, restart, stop, install, handleInstalled, launch,
+}: HeaderToolbarProps) {
+  const { actions } = useToolbarActions();
+
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      <span
+        className="text-[11px] font-mono px-3 py-1.5 border"
+        style={{ color: liveHex, borderColor: `${liveHex}55` }}
+      >
+        {liveStatus}
+      </span>
+
+      {isEffectivelyRunning ? (
+        <>
+          <button
+            onClick={restart}
+            disabled={transitioning}
+            className="px-3 py-1.5 text-xs text-zinc-200 border border-signal-low hover:border-signal-high hover:text-signal-high font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            restart
+          </button>
+          <button
+            onClick={stop}
+            disabled={transitioning}
+            className="px-3 py-1.5 text-xs text-bg-core bg-fault-vector hover:opacity-80 font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            stop
+          </button>
+        </>
+      ) : (
+        <>
+          {hasInstallStep && (
+            <button
+              onClick={async () => {
+                await install();
+                await handleInstalled();
+              }}
+              disabled={transitioning || server.isOrphaned}
+              className="px-3 py-1.5 text-xs text-zinc-200 border border-signal-low hover:border-signal-high hover:text-signal-high font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {busy ? "installing…" : installed ? "re-install" : "install"}
+            </button>
+          )}
+          <button
+            onClick={launch}
+            disabled={transitioning || server.isOrphaned}
+            className="px-3 py-1.5 text-xs text-bg-core bg-signal-high hover:opacity-80 font-semibold transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {launching ? "starting…" : "start"}
+          </button>
+        </>
+      )}
+
+      {/* Plugin toolbar actions */}
+      {actions.map((action) => (
+        <button
+          key={action.id}
+          onClick={() => void action.onClick()}
+          disabled={action.disabled}
+          className="px-3 py-1.5 text-xs text-zinc-200 border border-grid-bounds hover:border-signal-low hover:text-signal-high font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {action.icon && <span className="mr-1">{action.icon}</span>}
+          {action.label}
+        </button>
+      ))}
     </div>
   );
 }

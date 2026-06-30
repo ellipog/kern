@@ -2,7 +2,7 @@
  * Global UI state persistence — restores the full window UI state across
  * app launches: which view was active, which server was being viewed, which
  * tab was selected, what files were open, what tree directories were
- * expanded, plugin panel collapsed state, etc.
+ * expanded, command history, cursor position, etc.
  *
  * Architecture:
  *   - UiStateProvider wraps the app, loads persisted state on mount, and
@@ -24,6 +24,7 @@ import {
   ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import type { SortPref } from "../types/server";
 
 /* ─── Types ────────────────────────────────────────────────────────────── */
 
@@ -42,10 +43,8 @@ export interface EditorState {
 }
 
 export interface ServerUiState {
-  /** Which detail tab is active: logs or files. */
-  activeTab: "logs" | "files";
-  /** Whether the plugin panel is expanded. */
-  pluginExpanded: boolean;
+  /** Which detail tab is active. Built-in ids: "logs" (displayed as "terminal"), "files". */
+  activeTab: string;
   /** Command history for the terminal input (most-recent last). */
   commandHistory: string[];
   /** File editor state (open files, tree expansion, cursor). */
@@ -59,6 +58,8 @@ export interface UiState {
   selectedServerId: string | null;
   /** Per-server UI state, keyed by server id. */
   servers: Record<string, ServerUiState>;
+  /** The current instance sort preference. Defaults to name ascending. */
+  sortPreference: SortPref;
 }
 
 /* ─── Defaults ─────────────────────────────────────────────────────────── */
@@ -76,7 +77,6 @@ function defaultEditorState(): EditorState {
 function defaultServerUiState(): ServerUiState {
   return {
     activeTab: "logs",
-    pluginExpanded: true,
     commandHistory: [],
     editor: defaultEditorState(),
   };
@@ -87,6 +87,7 @@ function defaultUiState(): UiState {
     activeViewKind: "list",
     selectedServerId: null,
     servers: {},
+    sortPreference: { key: "name", direction: "asc" },
   };
 }
 
@@ -107,6 +108,10 @@ interface UiStateContextValue {
     serverId: string | null | undefined,
     partial: Partial<ServerUiState>,
   ) => void;
+  /**
+   * Update the instance sort preference. Persists immediately (debounced).
+   */
+  setSortPreference: (pref: SortPref) => void;
   /**
    * Synchronously flush any pending save. Called on beforeunload.
    */
@@ -219,6 +224,27 @@ export function UiStateProvider({
     [scheduleSave],
   );
 
+  const setSortPreference = useCallback(
+    (pref: SortPref) => {
+      setUiState((prev) => {
+        // No-op if unchanged — avoids a wasted save cycle.
+        if (
+          prev.sortPreference.key === pref.key &&
+          prev.sortPreference.direction === pref.direction
+        ) {
+          return prev;
+        }
+        const next: UiState = {
+          ...prev,
+          sortPreference: { key: pref.key, direction: pref.direction },
+        };
+        scheduleSave(next);
+        return next;
+      });
+    },
+    [scheduleSave],
+  );
+
   const updateServer = useCallback(
     (
       serverId: string | null | undefined,
@@ -252,6 +278,7 @@ export function UiStateProvider({
     uiState,
     setView,
     updateServer,
+    setSortPreference,
     flush,
   };
 

@@ -1,0 +1,786 @@
+/* ═══════════════════════════════════════════════
+ * Minecraft Java Plugin — Tab UIs
+ *
+ * Styling for both the "Setup" and "Chat" tabs.
+ * Loaded inside the tab's Shadow DOM via PluginTabContent,
+ * so all styles are fully isolated from the host.
+ *
+ * Design follows the kern design system:
+ *   --color-bg-core:     #050506
+ *   --color-bg-surface:  #0b0c10
+ *   --color-grid-bounds: #161920
+ *   --color-signal-high: #4cf5a0
+ *   --color-signal-low:  #4c525e
+ *   --color-warn-vector: #f5a04c
+ *   --color-fault-vector:#f54c4c
+ * ═══════════════════════════════════════════════ */
+
+/* ── Reset ─────────────────────────────────────── */
+
+.mc-tab *,
+.mc-tab *::before,
+.mc-tab *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+.mc-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-family: "JetBrains Mono", "Cascadia Code", "Fira Code", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #c8ccd4;
+  background: #050506;
+}
+
+/* ── Tab Header (shared) ───────────────────────── */
+
+.mc-tab-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #161920;
+  background: #0b0c10;
+  flex-shrink: 0;
+}
+
+.mc-tab-header-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.mc-tab-header-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  color: #c8ccd4;
+}
+
+.mc-tab-header-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #4cf5a0;
+  background: #0d1f14;
+  border: 1px solid #1a3a2a;
+  padding: 1px 6px;
+  margin-left: auto;
+}
+
+.mc-tab-header-sub {
+  font-size: 9px;
+  color: #525252;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-left: auto;
+}
+
+/* ── Scrollable body ───────────────────────────── */
+
+.mc-tab-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.mc-tab-body::-webkit-scrollbar {
+  width: 4px;
+}
+.mc-tab-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mc-tab-body::-webkit-scrollbar-thumb {
+  background: #161920;
+  border-radius: 2px;
+}
+
+/* ── Section card ──────────────────────────────── */
+
+.mc-section {
+  margin-bottom: 12px;
+  border: 1px solid #161920;
+  background: #0b0c10;
+}
+
+.mc-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #161920;
+  background: #08080a;
+}
+
+.mc-section-title {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: #525252;
+}
+
+.mc-section-body {
+  padding: 10px;
+}
+
+/* ── Control row (inline label + widget) ───────── */
+
+.mc-control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.mc-control-row:last-child {
+  margin-bottom: 0;
+}
+
+.mc-control-label {
+  font-size: 9px;
+  color: #525252;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  flex-shrink: 0;
+  min-width: 40px;
+}
+
+.mc-control-label-wide {
+  min-width: 32px;
+  font-size: 9px;
+  color: #525252;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  flex-shrink: 0;
+}
+
+/* ── Select / Input widgets ────────────────────── */
+
+.mc-select {
+  background: #141414;
+  border: 1px solid #242424;
+  color: #c0c0c0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+  cursor: pointer;
+  min-width: 0;
+}
+.mc-select:focus {
+  border-color: #505050;
+}
+.mc-select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mc-input {
+  background: #141414;
+  border: 1px solid #242424;
+  color: #c0c0c0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+}
+.mc-input:focus {
+  border-color: #505050;
+}
+
+/* ── Buttons ───────────────────────────────────── */
+
+.mc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 5px 12px;
+  border: 1px solid #242424;
+  background: #141414;
+  color: #b0b0b0;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.mc-btn:hover {
+  background: #1c1c1c;
+  border-color: #444;
+  color: #d4d4d4;
+}
+.mc-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.mc-btn-sm {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.mc-btn-primary {
+  background: #1a3a2a;
+  border-color: #2a5a3a;
+  color: #7acc9a;
+  font-weight: 600;
+}
+.mc-btn-primary:hover {
+  background: #1e4a32;
+  border-color: #3a7a4a;
+  color: #8addaa;
+}
+
+/* ── Status badge ──────────────────────────────── */
+
+.mc-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mc-status-dot-running {
+  background: #4cf5a0;
+  box-shadow: 0 0 6px rgba(76, 245, 160, 0.5);
+}
+.mc-status-dot-stopped {
+  background: #4c525e;
+}
+.mc-status-text {
+  font-size: 10px;
+  color: #4cf5a0;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.mc-status-text-stopped {
+  color: #4c525e;
+}
+
+
+/* ═══════════════════════════════════════════════
+ *  SETUP TAB
+ * ═══════════════════════════════════════════════ */
+
+.mc-setup-tab {
+  /* uses .mc-tab defaults */
+}
+
+/* Version row */
+.mc-version-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.mc-ver-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #7acc9a;
+  background: #0d1f14;
+  border: 1px solid #1a3a2a;
+  padding: 3px 7px;
+  white-space: nowrap;
+}
+
+.mc-ver-select {
+  flex: 1;
+  min-width: 140px;
+  background: #141414;
+  border: 1px solid #242424;
+  color: #c0c0c0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+  cursor: pointer;
+}
+.mc-ver-select:focus {
+  border-color: #505050;
+}
+.mc-ver-select:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.mc-ver-spinner {
+  font-size: 13px;
+  color: #6080c0;
+  animation: mc-spin 1s linear infinite;
+}
+
+.mc-ver-hint {
+  display: block;
+  font-size: 9px;
+  color: #484848;
+  margin-top: 4px;
+}
+
+/* Toggle */
+.mc-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.mc-toggle-input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.mc-toggle-track {
+  position: relative;
+  width: 26px;
+  height: 12px;
+  background: #242424;
+  border-radius: 6px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+.mc-toggle-input:checked + .mc-toggle-track {
+  background: #1a3a2a;
+}
+.mc-toggle-knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 10px;
+  height: 10px;
+  background: #808080;
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+.mc-toggle-input:checked + .mc-toggle-track .mc-toggle-knob {
+  transform: translateX(14px);
+  background: #7acc9a;
+}
+.mc-toggle-label {
+  font-size: 9px;
+  color: #606060;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* Config grid */
+.mc-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 16px;
+}
+
+.mc-config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.mc-config-item-full {
+  grid-column: 1 / -1;
+}
+
+.mc-config-label {
+  font-size: 9px;
+  color: #525252;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.mc-config-value {
+  font-size: 12px;
+  color: #b0b0b0;
+}
+
+.mc-jvm-flags {
+  display: block;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #808080;
+  background: #080808;
+  border: 1px solid #181818;
+  padding: 5px 8px;
+  margin-top: 2px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.mc-jvm-custom {
+  border-color: #2a3a1a;
+  color: #8aaa6a;
+}
+
+/* Java section */
+.mc-java-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.mc-java-select {
+  flex: 1;
+  min-width: 120px;
+  background: #141414;
+  border: 1px solid #242424;
+  color: #c0c0c0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+  cursor: pointer;
+}
+.mc-java-select:focus {
+  border-color: #505050;
+}
+
+.mc-java-path-input {
+  flex: 0 1 200px;
+  min-width: 100px;
+  background: #141414;
+  border: 1px solid #242424;
+  color: #c0c0c0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  outline: none;
+}
+.mc-java-path-input:focus {
+  border-color: #505050;
+}
+
+.mc-java-info {
+  font-size: 10px;
+  color: #606060;
+  padding: 2px 0;
+}
+
+.mc-java-missing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #1a1408;
+  border: 1px solid #3a2a10;
+}
+
+.mc-java-warn {
+  font-size: 11px;
+  color: #e8a020;
+}
+
+.mc-java-downloading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.mc-java-hint {
+  font-size: 10px;
+  color: #4cf5a0;
+}
+
+/* Install section */
+.mc-install-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.mc-install-hint {
+  font-size: 10px;
+  color: #505050;
+}
+
+.mc-install-spinner {
+  font-size: 10px;
+  color: #7acc9a;
+  animation: mc-spin 1s linear infinite;
+}
+
+.mc-install-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 8px;
+}
+
+.mc-install-step {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 4px;
+  font-size: 10px;
+}
+
+.mc-install-dot {
+  flex: 0 0 10px;
+  text-align: center;
+  font-size: 9px;
+}
+
+.mc-install-label {
+  flex: 1;
+  color: #808080;
+}
+
+.mc-install-log {
+  background: #080808;
+  border: 1px solid #181818;
+  padding: 6px 8px;
+  max-height: 120px;
+  overflow-y: auto;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #5a5a5a;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 6px;
+}
+
+.mc-install-log::-webkit-scrollbar {
+  width: 4px;
+}
+.mc-install-log::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+.mc-install-log::-webkit-scrollbar-thumb {
+  background: #222;
+}
+
+.mc-install-btn-stretch {
+  width: 100%;
+  justify-content: center;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* ── Animations ────────────────────────────────── */
+
+@keyframes mc-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+
+/* ═══════════════════════════════════════════════
+ *  CHAT TAB
+ * ═══════════════════════════════════════════════ */
+
+.mc-chat-tab {
+  /* uses .mc-tab defaults */
+}
+
+/* Header/status bar — same visual weight as .mc-tab-header */
+.mc-chat-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #161920;
+  background: #0b0c10;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.mc-chat-status-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: #6a6f7a;
+}
+
+.mc-chat-status-divider {
+  width: 1px;
+  height: 10px;
+  background: #161920;
+  flex-shrink: 0;
+}
+
+/* Main 2-column layout inside the flexible body */
+.mc-chat-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Chat column (left) */
+.mc-chat-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid #161920;
+}
+
+.mc-chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 10px;
+  background: #050506;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.mc-chat-log::-webkit-scrollbar {
+  width: 4px;
+}
+.mc-chat-log::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mc-chat-log::-webkit-scrollbar-thumb {
+  background: #161920;
+}
+
+.mc-chat-empty {
+  color: #404040;
+  font-style: italic;
+  font-size: 11px;
+  padding: 16px 0;
+  text-align: center;
+}
+
+.mc-chat-line {
+  color: #8a8a8a;
+  word-break: break-word;
+}
+
+.mc-chat-input-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-top: 1px solid #161920;
+  background: #0b0c10;
+  flex-shrink: 0;
+}
+
+.mc-chat-input {
+  flex: 1;
+  min-width: 0;
+  background: #141414;
+  border: 1px solid #242424;
+  color: #c0c0c0;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 5px 8px;
+  outline: none;
+}
+.mc-chat-input:focus {
+  border-color: #505050;
+}
+
+/* Players column (right) */
+.mc-players-column {
+  width: 180px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0b0c10;
+}
+
+.mc-players-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid #161920;
+  font-size: 9px;
+  font-weight: 600;
+  color: #525252;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  background: #08080a;
+}
+
+.mc-player-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.mc-player-list::-webkit-scrollbar {
+  width: 4px;
+}
+.mc-player-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mc-player-list::-webkit-scrollbar-thumb {
+  background: #161920;
+}
+
+.mc-player-empty {
+  color: #404040;
+  font-style: italic;
+  font-size: 10px;
+  padding: 12px 10px;
+  text-align: center;
+}
+
+.mc-player-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.mc-player-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #4cf5a0;
+  flex-shrink: 0;
+}
+
+.mc-player-name {
+  color: #b0b0b0;
+  word-break: break-word;
+}
+
+/* Quick commands toolbar */
+.mc-quick-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-top: 1px solid #161920;
+  background: #0b0c10;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.mc-quick-label {
+  font-size: 9px;
+  color: #525252;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-right: 4px;
+}
+
+.mc-quick-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+}
