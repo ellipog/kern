@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { usePlugins } from "../../hooks/usePlugins";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
@@ -8,6 +8,8 @@ import type { Manifest } from "../../types/manifest";
 interface PluginManagerProps {
   /** Called when the user wants to go back to the server list. */
   onBack: () => void;
+  /** Pre-loaded .kern file path from deep link (e.g., double-click in Explorer). */
+  preselectedKernPath?: string | null;
 }
 
 /**
@@ -17,10 +19,24 @@ interface PluginManagerProps {
  * Matches the kern dark-room palette. The view follows the same header +
  * content layout as ServerDetailView.
  */
-export function PluginManager({ onBack }: PluginManagerProps) {
+export function PluginManager({ onBack, preselectedKernPath }: PluginManagerProps) {
   const { plugins, loading, error: loadError, refresh } = usePlugins();
   const [installOpen, setInstallOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // Auto-open installer if a .kern path was passed (deep link from file double-click)
+  const [preselectedPath, setPreselectedPath] = useState<string | null>(
+    // Initialize from prop if provided
+    () => null
+  );
+
+  // Set preselected path when prop changes
+  useEffect(() => {
+    if (preselectedKernPath) {
+      setPreselectedPath(preselectedKernPath);
+      setInstallOpen(true);
+    }
+  }, [preselectedKernPath]);
 
   // Stabilised callbacks so child dialog effects don't re-register on every render.
   const closeInstall = useCallback(() => setInstallOpen(false), []);
@@ -174,6 +190,7 @@ export function PluginManager({ onBack }: PluginManagerProps) {
         isOpen={installOpen}
         onClose={closeInstall}
         onInstalled={handleInstalled}
+        initialPath={preselectedPath ?? undefined}
       />
     </div>
   );

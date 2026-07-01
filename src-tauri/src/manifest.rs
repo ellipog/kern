@@ -31,6 +31,9 @@ pub struct Manifest {
     pub version: String,
     #[serde(default)]
     pub author: String,
+    /// Optional description shown during plugin install preview.
+    #[serde(default)]
+    pub description: String,
     /// Path to the compiled ESM frontend bundle, relative to the manifest.
     #[serde(default)]
     pub ui_entry: Option<String>,

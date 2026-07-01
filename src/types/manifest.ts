@@ -55,6 +55,8 @@ export interface Manifest {
   displayName: string;
   version: string;
   author: string;
+  /** Optional description shown during plugin install preview. */
+  description?: string;
   /** Path to the compiled ESM frontend bundle, relative to the manifest. */
   uiEntry?: string;
   /** Configuration fields surfaced to the host for dynamic form generation. */

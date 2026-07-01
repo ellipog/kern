@@ -2040,6 +2040,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-shell",
+ "tempfile",
  "ureq",
  "walkdir",
  "zip",

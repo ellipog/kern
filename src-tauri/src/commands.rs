@@ -1303,6 +1303,9 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
 ///
 /// Returns an error if the plugin is not found, or if any registered server
 /// instance still references it. The caller should confirm before calling.
+///
+/// If `upgrade` is true and the plugin exists, it will be removed to allow
+/// a fresh install (used by .kern package upgrades).
 #[tauri::command]
 pub fn uninstall_plugin(app_handle: AppHandle, id: String) -> Result<(), String> {
     let base = config::config_dir(&app_handle)?;
@@ -1331,6 +1334,229 @@ pub fn uninstall_plugin(app_handle: AppHandle, id: String) -> Result<(), String>
 
     std::fs::remove_dir_all(&target)
         .map_err(|e| format!("failed to remove plugin '{id}': {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// .kern file support (plugin packages)
+// ---------------------------------------------------------------------------
+
+/// Validates a .kern file and returns its manifest without installing.
+/// Used to preview plugin info before installation.
+#[tauri::command]
+pub fn validate_kern_file(path: String) -> Result<manifest::Manifest, String> {
+    let p = std::path::Path::new(&path);
+
+    // Check file extension
+    if p.extension().and_then(|e| e.to_str()) != Some("kern") {
+        return Err(format!(
+            "file '{}' is not a .kern file",
+            p.display()
+        ));
+    }
+
+    if !p.exists() {
+        return Err(format!("file '{}' does not exist", p.display()));
+    }
+
+    // Extract manifest from the .kern (zip) archive to a temp directory
+    let temp_dir = tempfile::tempdir()
+        .map_err(|e| format!("failed to create temp directory: {e}"))?;
+
+    extract_kern_archive(p, temp_dir.path())?;
+
+    // Load and validate manifest
+    let manifest_path = temp_dir.path().join("manifest.json");
+    if !manifest_path.exists() {
+        return Err("plugin package does not contain a manifest.json".to_string());
+    }
+
+    manifest::load(&manifest_path)
+}
+
+/// Installs a plugin from a .kern file.
+/// If a plugin with the same id exists, sets `force` to true to upgrade/reinstall.
+#[tauri::command]
+pub fn install_plugin_from_kern(
+    app_handle: AppHandle,
+    source_path: String,
+    force: bool,
+) -> Result<manifest::Manifest, String> {
+    let p = std::path::Path::new(&source_path);
+
+    // Validate it's a .kern file
+    if p.extension().and_then(|e| e.to_str()) != Some("kern") {
+        return Err(format!(
+            "file '{}' is not a .kern file",
+            p.display()
+        ));
+    }
+
+    if !p.exists() {
+        return Err(format!("file '{}' does not exist", p.display()));
+    }
+
+    // Extract to temp directory
+    let temp_dir = tempfile::tempdir()
+        .map_err(|e| format!("failed to create temp directory: {e}"))?;
+
+    extract_kern_archive(p, temp_dir.path())?;
+
+    // Load and validate manifest
+    let manifest_path = temp_dir.path().join("manifest.json");
+    if !manifest_path.exists() {
+        return Err("plugin package does not contain a manifest.json".to_string());
+    }
+    let manifest = manifest::load(&manifest_path)?;
+
+    let base = config::config_dir(&app_handle)?;
+    let plugins_target = manifest::plugins_dir(&base);
+    let target = plugins_target.join(&manifest.id);
+
+    // Check for existing plugin - upgrade if force is true
+    if target.exists() {
+        if !force {
+            return Err(format!(
+                "plugin '{}' is already installed — uninstall it first or use force=true to upgrade",
+                manifest.id
+            ));
+        }
+        // Remove existing plugin for upgrade
+        std::fs::remove_dir_all(&target)
+            .map_err(|e| format!("failed to remove existing plugin '{}': {e}", manifest.id))?;
+    }
+
+    // Copy extracted plugin to plugins directory
+    std::fs::create_dir_all(&target)
+        .map_err(|e| format!("failed to create plugin directory: {e}"))?;
+
+    copy_dir_recursive(temp_dir.path(), &target).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&target);
+        format!("failed to copy plugin directory: {e}")
+    })?;
+
+    Ok(manifest)
+}
+
+/// Creates a .kern package from a plugin directory.
+/// Useful for plugin developers to package their plugins.
+#[tauri::command]
+pub fn create_plugin_package(
+    source_path: String,
+    output_path: Option<String>,
+) -> Result<String, String> {
+    let p = std::path::Path::new(&source_path);
+
+    // Validate source directory exists
+    if !p.is_dir() {
+        return Err(format!(
+            "source path '{}' is not a directory",
+            p.display()
+        ));
+    }
+
+    // Validate manifest exists in source
+    let manifest_path = p.join("manifest.json");
+    if !manifest_path.exists() {
+        return Err(format!(
+            "source directory '{}' does not contain a manifest.json",
+            p.display()
+        ));
+    }
+
+    // Determine output path
+    let output = match output_path {
+        Some(op) => std::path::Path::new(&op).to_path_buf(),
+        None => {
+            // Use source directory with .kern extension
+            // Name: <plugin-id>.kern (no version in filename)
+            let manifest: manifest::Manifest = manifest::load(&manifest_path)?;
+            p.join(format!("{}.kern", manifest.id))
+        }
+    };
+
+    // Create the zip archive
+    let file = std::fs::File::create(&output)
+        .map_err(|e| format!("failed to create output file: {e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut buffer = Vec::new();
+    add_dir_to_zip(&mut zip, p, p, &mut buffer, options)
+        .map_err(|e| format!("failed to create package: {e}"))?;
+
+    zip.finish()
+        .map_err(|e| format!("failed to finalize package: {e}"))?;
+
+    Ok(output.to_string_lossy().to_string())
+}
+
+/// Recursively adds a directory to a zip archive.
+fn add_dir_to_zip(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    base: &std::path::Path,
+    current: &std::path::Path,
+    buffer: &mut Vec<u8>,
+    options: zip::write::FileOptions<()>,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(current)
+        .map_err(|e| e.to_string())?
+    {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let relative = path.strip_prefix(base).unwrap_or(&path);
+
+        if path.is_dir() {
+            zip.add_directory(relative.to_string_lossy(), options)
+                .map_err(|e| e.to_string())?;
+            add_dir_to_zip(zip, base, &path, buffer, options)?;
+        } else {
+            zip.start_file(relative.to_string_lossy(), options)
+                .map_err(|e| e.to_string())?;
+            let mut f = std::fs::File::open(&path)
+                .map_err(|e| e.to_string())?;
+            f.read_to_end(buffer)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(buffer)
+                .map_err(|e| e.to_string())?;
+            buffer.clear();
+        }
+    }
+    Ok(())
+}
+
+/// Extracts a .kern (zip) archive to the specified destination.
+fn extract_kern_archive(archive_path: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| format!("failed to open .kern file: {e}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("invalid .kern archive: {e}"))?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)
+            .map_err(|e| format!("failed to read archive entry: {e}"))?;
+        let outpath = dst.join(file.name());
+
+        if file.is_dir() {
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| format!("failed to create directory: {e}"))?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create parent dir: {e}"))?;
+            }
+            let mut outfile = std::fs::File::create(&outpath)
+                .map_err(|e| format!("failed to create file: {e}"))?;
+            let mut content = Vec::new();
+            file.read_to_end(&mut content)
+                .map_err(|e| format!("failed to read archive: {e}"))?;
+            outfile.write_all(&content)
+                .map_err(|e| format!("failed to write file: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

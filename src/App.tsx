@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/layout/AppShell";
 import { ServerList } from "./components/servers/ServerList";
 import { ServerForm } from "./components/servers/ServerForm";
@@ -121,6 +122,40 @@ function AppInner() {
   } = useServers();
   const { uiState, setView, setSortPreference } = useUiState();
   const bridgeRef = useContext(SelectedIdBridgeContext);
+
+  // Deep link state - .kern file opened via double-click
+  const [deepLinkedKernPath, setDeepLinkedKernPath] = useState<string | null>(null);
+
+  // Listen for deep link events from Rust backend
+  useEffect(() => {
+    const unlisten = listen<string>("kern://open-install", (event) => {
+      // The URL format is kern://install?url=file%3A%2F%2F...
+      const url = event.payload;
+      try {
+        const parsed = new URL(url);
+        const filePath = parsed.searchParams.get("url");
+        if (filePath) {
+          // Decode the file:// URL to get the actual path
+          let decodedPath = decodeURIComponent(filePath);
+          // Remove file:// prefix on Windows
+          if (decodedPath.startsWith("file://")) {
+            decodedPath = decodedPath.replace("file://", "");
+          }
+          // On Windows, remove the leading slash
+          if (decodedPath.match(/^[/\\]/)) {
+            decodedPath = decodedPath.substring(1);
+          }
+          setDeepLinkedKernPath(decodedPath);
+          setViewLocal({ kind: "plugins" });
+        }
+      } catch {
+        // Ignore malformed URLs
+      }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
 
   // Overlay live process status onto the persisted list. The sidebar + main
   // list read persisted status, which only refreshes on explicit reload() and
@@ -351,7 +386,11 @@ function AppInner() {
             )}
 
             {view.kind === "plugins" && (
-              <PluginManager key="plugins" onBack={() => navigate("list")} />
+              <PluginManager
+                key="plugins"
+                onBack={() => navigate("list")}
+                preselectedKernPath={deepLinkedKernPath}
+              />
             )}
           </div>
         )}
